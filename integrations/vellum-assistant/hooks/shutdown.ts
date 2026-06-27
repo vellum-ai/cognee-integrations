@@ -2,27 +2,36 @@
  * shutdown hook — fires once when the assistant tears down the plugin
  * (process exit, unload).
  *
- * Replaces the Claude Code SessionEnd hook. Spawns sync-session-to-graph.py
- * --session-end which triggers a detached final sync worker that bridges
- * session cache entries into the permanent knowledge graph and unregisters
- * the agent connection.
+ *   1. Triggers a final session-to-graph sync (with unregister)
+ *   2. Clears the server-ready marker
  */
 
 import type { PluginShutdownContext } from "@vellumai/plugin-api";
-import { runPythonScript, buildSessionEndPayload } from "../src/bridge.ts";
+
+import {
+  getSessionKey,
+  hookLog,
+  clearServerReady,
+} from "../src/plugin-common.ts";
+import { syncSessionToGraph } from "../src/sync-session-to-graph.ts";
 
 export default async function shutdown(_ctx: PluginShutdownContext): Promise<void> {
-  // The session-end sync is best-effort. We don't have the conversationId in
-  // the shutdown context, but the Python script resolves the session from
-  // the COGNEE_SESSION_KEY env var (set by earlier hooks) and from its own
-  // session map files.
-  try {
-    await runPythonScript(
-      "sync-session-to-graph.py",
-      buildSessionEndPayload(""),
-      ["--session-end"],
-    );
-  } catch {
-    // Best-effort: never throw on shutdown.
+  // The session key should still be in the env from earlier hooks.
+  const sessionKey = getSessionKey();
+  if (!sessionKey) {
+    clearServerReady();
+    return;
   }
+
+  // 1. Final graph sync with unregister.
+  try {
+    await syncSessionToGraph(true);
+  } catch (err) {
+    hookLog("shutdown_sync_failed", { error: String(err).slice(0, 200) });
+  }
+
+  // 2. Clear the server-ready marker.
+  clearServerReady();
+
+  hookLog("shutdown_complete");
 }

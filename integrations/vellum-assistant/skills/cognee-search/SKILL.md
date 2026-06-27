@@ -23,26 +23,23 @@ Knowledge is organized into three categories via `node_set`:
 
 ## Instructions
 
-Search goes through the **running Cognee server** (`POST /api/v1/recall`) — the source of truth. Use the wrapper below: it queries the server first, searches **all your authorized datasets** (so a hit isn't missed because it lives in another dataset), and falls back to `cognee-cli` only if the server is unreachable.
+Use the **cognee_recall** tool to search Cognee memory. It calls the running Cognee server (`POST /api/v1/recall`) directly in-process — no shell, no subprocess.
 
 **One broad search is usually enough** — the `user-prompt-submit` hook already injects session/trace/graph context every turn, so avoid running many targeted searches.
 
-### Search (server-first)
+### Search via the cognee_recall tool
 
-```bash
-# session cache + permanent graph (default)
-${VELLUM_PLUGIN_ROOT}/scripts/cognee-search.sh "$ARGUMENTS"
-
-# permanent graph only
-${VELLUM_PLUGIN_ROOT}/scripts/cognee-search.sh "$ARGUMENTS" 10 --graph
-
-# current session only
-${VELLUM_PLUGIN_ROOT}/scripts/cognee-search.sh "$ARGUMENTS" 10 --session
 ```
+cognee_recall(query="your search query", top_k=10, scope="auto")
+```
+
+- `scope="auto"` — session cache + permanent graph (default)
+- `scope="graph"` — permanent graph only
+- `scope="session"` — current session only
 
 ### Filter by category (optional)
 
-Categories (`user_context` / `project_docs` / `agent_actions`) filter by node set. `cognee-cli recall` does **not** expose this — pass `node_name` to the server directly:
+Categories (`user_context` / `project_docs` / `agent_actions`) filter by node set. Use a direct curl to pass `node_name`:
 
 ```bash
 curl -s -X POST "${COGNEE_BASE_URL:-http://localhost:8011}/api/v1/recall" \
@@ -53,7 +50,7 @@ curl -s -X POST "${COGNEE_BASE_URL:-http://localhost:8011}/api/v1/recall" \
 
 ### Ground-truth a suspicious result (debugging)
 
-The server is authoritative. If a search returns empty but you expect content, confirm directly — **do not** conclude "not found" from empty CLI output:
+The server is authoritative. If a search returns empty but you expect content, confirm directly — **do not** conclude "not found" from an empty result without checking:
 
 ```bash
 curl -s -X POST "${COGNEE_BASE_URL:-http://localhost:8011}/api/v1/recall" \
@@ -62,15 +59,7 @@ curl -s -X POST "${COGNEE_BASE_URL:-http://localhost:8011}/api/v1/recall" \
   -d '{"query": "...", "top_k": 5, "only_context": true, "scope": ["graph"]}'
 ```
 
-(An authed/cloud server needs `COGNEE_API_KEY`; a local single-user server ignores an empty key. If the response is an `{"error": ...}` object rather than a list, the server was reachable but rejected/failed the request — that's an error, **not** "no results".)
-
-### Fallback only — server unreachable
-
-`cognee-cli` is a thin client over the same server and can print **empty stdout even when content exists**. Use it only when the server is down, and treat empty output as *inconclusive*, never as "no results":
-
-```bash
-cognee-cli recall "$ARGUMENTS" -k 5 -f json
-```
+If the response is an `{"error": ...}` object rather than a list, the server was reachable but rejected/failed the request — that's an error, **not** "no results".
 
 ## Understanding results
 
@@ -85,8 +74,8 @@ Session entries tagged with `[category:agent]` are automatic tool call logs.
 | Signal | Action |
 |--------|--------|
 | Need current session context | Already automatic, no action needed |
-| User explicitly says "search cognee" | `cognee-search.sh "<query>"` (server-first) |
-| "what does the codebase do" / "what did we do last time" | `cognee-search.sh "<query>" 10 --graph` |
-| Need a specific category | use the `node_name` curl form above (`["user_context"\|"project_docs"\|"agent_actions"]`) |
-| Auto context insufficient | `cognee-search.sh "<query>" 10 --session` |
-| **Result empty but you expect content** | **Ground-truth via the `curl` above before concluding "not found"** |
+| User explicitly says "search cognee" | `cognee_recall(query="...")` |
+| "what does the codebase do" / "what did we do last time" | `cognee_recall(query="...", scope="graph")` |
+| Need a specific category | use the `node_name` curl form above |
+| Auto context insufficient | `cognee_recall(query="...", scope="session")` |
+| **Result empty but you expect content** | **Ground-truth via the curl above before concluding "not found"** |

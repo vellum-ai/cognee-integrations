@@ -1,19 +1,21 @@
 /**
- * cognee-recall tool — model-visible tool that searches Cognee memory.
+ * cognee_recall tool — model-visible tool that searches Cognee memory.
  *
- * Replaces the Claude Code cognee-recall agent. The model can call this tool
- * for deeper or cross-session searches when the automatic context injected
- * by the user-prompt-submit hook is insufficient.
- *
- * The tool shells out to cognee-search.sh which queries the running Cognee
- * server (/api/v1/recall) — the source of truth — and falls back to cognee-cli
- * only if the server is unreachable.
+ * The model can call this tool for deeper or cross-session searches
+ * when the automatic context injected by the user-prompt-submit hook
+ * is insufficient. All calls go through the in-process cognee-client
+ * (no subprocess, no shell).
  */
 
-import type { ToolDefinition, ToolContext, ToolExecutionResult } from "@vellumai/plugin-api";
-import { spawn } from "bun";
-import { join } from "node:path";
-import { PLUGIN_ROOT, sessionKey } from "../src/bridge.ts";
+import type { ToolDefinition } from "@vellumai/plugin-api";
+
+import {
+  loadConfig,
+  resolveSessionId,
+  sanitizeSessionKey,
+  resolveHttpEndpoint,
+} from "../src/plugin-common.ts";
+import { recall, UNREACHABLE, type RecallResult } from "../src/cognee-client.ts";
 
 interface RecallParams {
   query: string;
@@ -27,7 +29,7 @@ export const cogneeRecall: ToolDefinition = {
     "Search Cognee memory (session cache and permanent knowledge graph) to retrieve relevant context. " +
     "Session memory is auto-searched on every prompt via hooks; use this tool for deeper or cross-session searches. " +
     "Can filter by scope: 'session' for current session only, 'graph' for permanent graph only, 'auto' for both.",
-  parameters: {
+  input_schema: {
     type: "object",
     properties: {
       query: {
@@ -41,79 +43,83 @@ export const cogneeRecall: ToolDefinition = {
       scope: {
         type: "string",
         enum: ["session", "graph", "auto"],
-        description: "Search scope: 'session' for current session cache, 'graph' for permanent knowledge graph, 'auto' for both (default).",
+        description:
+          "Search scope: 'session' for current session cache, 'graph' for permanent knowledge graph, 'auto' for both (default).",
       },
     },
     required: ["query"],
   },
-  riskLevel: "low",
+  defaultRiskLevel: "low",
 
   async execute(
-    ctx: ToolContext,
-    params: RecallParams,
-  ): Promise<ToolExecutionResult> {
+    input: Record<string, unknown>,
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const params = input as RecallParams;
     const query = params.query;
     if (!query) {
       return { content: [{ type: "text", text: "Error: no query provided" }] };
     }
 
-    const topK = String(params.top_k ?? 10);
-    const scopeFlag = params.scope === "session" ? "--session" : params.scope === "graph" ? "--graph" : "";
-    const args = [query, topK];
-    if (scopeFlag) args.push(scopeFlag);
+    const cfg = loadConfig();
+    const { baseUrl, apiKey } = resolveHttpEndpoint();
 
-    const env: Record<string, string> = {
-      ...process.env,
-      COGNEE_SESSION_KEY: sessionKey(ctx.conversationId),
-    };
+    if (!apiKey) {
+      return {
+        content: [{
+          type: "text",
+          text: "Cognee search failed: no API key configured. Set COGNEE_API_KEY or ensure the local cognee server is running.",
+        }],
+      };
+    }
 
-    const scriptPath = join(PLUGIN_ROOT, "scripts", "cognee-search.sh");
+    // Resolve session from conversationId if available in env.
+    const sessionKey = sanitizeSessionKey(process.env.COGNEE_SESSION_KEY ?? "");
+    const sessionId = sessionKey ? resolveSessionId(sessionKey, cfg.agentName) : "";
+
+    const topK = params.top_k ?? 10;
+    const scopeParam = params.scope ?? "auto";
+    const scope =
+      scopeParam === "session"
+        ? ["session"]
+        : scopeParam === "graph"
+          ? ["graph"]
+          : ["session", "graph"];
 
     try {
-      const proc = spawn({
-        cmd: ["bash", scriptPath, ...args],
-        stdout: "pipe",
-        stderr: "pipe",
-        env,
-      });
+      const result = await recall(
+        baseUrl,
+        apiKey,
+        query,
+        sessionId,
+        scope,
+        topK,
+        cfg.dataset,
+      );
 
-      const stdout = await new Response(proc.stdout).text();
-      const stderr = await new Response(proc.stderr).text();
-      const exitCode = await proc.exited;
-
-      if (exitCode !== 0 && !stdout.trim()) {
+      if (result === UNREACHABLE) {
         return {
           content: [{
             type: "text",
-            text: `Cognee search failed (exit ${exitCode}): ${stderr.trim() || "no output"}`,
+            text: "Cognee search failed: server unreachable. The server may be down or not yet started.",
           }],
         };
       }
 
-      // Parse the JSON results from stdout.
-      let results: unknown;
-      try {
-        results = JSON.parse(stdout.trim());
-      } catch {
-        // Non-JSON output (e.g. CLI fallback) — return as plain text.
-        return { content: [{ type: "text", text: stdout.trim() }] };
-      }
-
-      if (Array.isArray(results)) {
-        if (results.length === 0) {
+      if (Array.isArray(result)) {
+        if (result.length === 0) {
           return {
             content: [{
               type: "text",
               text: "No results found. The server returned an empty list (authoritative). " +
-                "Try /cognee-memory:cognee-sync to sync session data to the permanent graph, " +
-                "or /cognee-memory:cognee-remember to ingest new data.",
+                "Try using the cognee-sync skill to sync session data to the permanent graph, " +
+                "or the cognee-remember skill to ingest new data.",
             }],
           };
         }
 
         // Format results for the model.
         const lines: string[] = [];
-        for (const entry of results) {
+        for (const entry of result) {
           const e = entry as Record<string, unknown>;
           const source = (e._source as string) ?? (e.source as string) ?? "unknown";
           const question = (e.question as string) ?? "";
@@ -137,13 +143,13 @@ export const cogneeRecall: ToolDefinition = {
         return {
           content: [{
             type: "text",
-            text: `Cognee memory search results (${results.length} hits):\n\n${lines.join("\n")}`,
+            text: `Cognee memory search results (${result.length} hits):\n\n${lines.join("\n")}`,
           }],
         };
       }
 
       // Error envelope from the server.
-      const errObj = results as Record<string, unknown>;
+      const errObj = result as Record<string, unknown>;
       if (errObj.error) {
         return {
           content: [{
@@ -153,7 +159,12 @@ export const cogneeRecall: ToolDefinition = {
         };
       }
 
-      return { content: [{ type: "text", text: stdout.trim() }] };
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(result, null, 2),
+        }],
+      };
     } catch (err) {
       return {
         content: [{

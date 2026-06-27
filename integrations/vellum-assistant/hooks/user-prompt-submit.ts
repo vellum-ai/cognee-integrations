@@ -2,69 +2,80 @@
  * user-prompt-submit hook — fires once per user turn, after messages are
  * assembled and before the agent loop runs.
  *
- * Replaces the Claude Code UserPromptSubmit hook. Spawns session-context-lookup.py
- * which searches Cognee memory (session cache + permanent knowledge graph) and
- * returns relevant context. The context is injected into latestMessages so the
- * model sees it.
- *
- * Also spawns store-user-prompt.py (async/fire-and-forget) to stage the prompt
- * for later pairing with the assistant's response on Stop.
+ *   1. Resolves the Cognee session for this conversation
+ *   2. Searches Cognee memory (session cache + permanent graph) for context
+ *   3. Injects relevant context into latestMessages so the model sees it
+ *   4. Stages the prompt for later pairing with the assistant's response on Stop
+ *   5. Registers the agent connection if not already registered
  */
 
 import type { UserPromptSubmitContext, Message } from "@vellumai/plugin-api";
+
 import {
-  runPythonScript,
-  runPythonScriptDetached,
-  buildPromptLookupPayload,
-  buildStorePromptPayload,
-  sessionKey,
-  extractAdditionalContext,
-} from "../src/bridge.ts";
+  loadConfig,
+  resolveSessionId,
+  sanitizeSessionKey,
+  hookLog,
+  touchActivity,
+  resolveHttpEndpoint,
+} from "../src/plugin-common.ts";
+import {
+  resolveAgentConnection,
+  registerAgent,
+} from "../src/cognee-client.ts";
+import { setSessionEnv } from "../src/bridge.ts";
+import { searchContext } from "../src/session-context-lookup.ts";
+import { storeUserPrompt } from "../src/store-user-prompt.ts";
 
 export default async function userPromptSubmit(
   ctx: UserPromptSubmitContext,
 ): Promise<Partial<UserPromptSubmitContext> | void> {
   const prompt = ctx.prompt;
-  if (!prompt || prompt.length < 5) {
+  if (!prompt || prompt.length < 5) return;
+
+  const conversationId = ctx.conversationId;
+  setSessionEnv(conversationId);
+
+  const cfg = loadConfig();
+  const { baseUrl, apiKey } = resolveHttpEndpoint();
+
+  if (!apiKey) {
+    hookLog("user_prompt_skip_no_api_key");
     return;
   }
 
-  const conversationId = ctx.conversationId;
-  const cwd = process.cwd();
-  const env: Record<string, string> = {};
-  env.COGNEE_SESSION_KEY = sessionKey(conversationId);
+  const sessionKey = sanitizeSessionKey(conversationId);
+  const sessionId = resolveSessionId(sessionKey, cfg.agentName);
+  touchActivity();
 
-  // 1. Context lookup (synchronous — the model needs the results before answering).
+  // 1. Register the agent connection if not already registered.
   try {
-    const result = await runPythonScript(
-      "session-context-lookup.py",
-      buildPromptLookupPayload(prompt, conversationId, cwd),
-      [],
-      env,
-    );
+    const conn = await resolveAgentConnection(baseUrl, apiKey, sessionKey);
+    if (!conn?.registered) {
+      await registerAgent(baseUrl, apiKey, sessionKey, [cfg.dataset]);
+    }
+  } catch {
+    // Non-fatal — proceed with context lookup.
+  }
 
-    const additionalContext = extractAdditionalContext(result);
-    if (additionalContext) {
-      // Inject the Cognee context as a system message the model will see.
+  // 2. Context lookup (synchronous — the model needs the results before answering).
+  try {
+    const context = await searchContext(prompt, sessionId, cfg.dataset);
+    if (context) {
       const contextMessage: Message = {
         role: "system",
-        content: additionalContext,
+        content: context,
       };
       ctx.latestMessages.push(contextMessage);
     }
-  } catch {
-    // Non-fatal: the turn proceeds without Cognee context.
+  } catch (err) {
+    hookLog("context_lookup_failed", { error: String(err).slice(0, 200) });
   }
 
-  // 2. Stage the prompt (async — pairs with the assistant response on Stop).
+  // 3. Stage the prompt for pairing with the assistant response on Stop.
   try {
-    runPythonScriptDetached(
-      "store-user-prompt.py",
-      buildStorePromptPayload(prompt, conversationId, cwd),
-      [],
-      env,
-    );
+    await storeUserPrompt(prompt, conversationId, process.cwd());
   } catch {
-    // Fire-and-forget: never throw.
+    // Fire-and-forget.
   }
 }
