@@ -19,36 +19,41 @@ Cognee organizes knowledge into three categories via `node_set` tagging:
 
 ## Instructions
 
-Determine the category from the user's intent, then run:
+Use the `cognee_recall` tool to search for existing related content before storing, then use a bash command to POST to the running Cognee server's remember endpoint:
 
 **User data** (preferences, corrections, personal context):
 ```bash
-${VELLUM_PLUGIN_ROOT}/scripts/cognee-remember.sh "$ARGUMENTS" --node-set user_context
+curl -s -X POST "${COGNEE_BASE_URL:-http://localhost:8011}/api/v1/remember" \
+  -H "X-Api-Key: ${COGNEE_API_KEY:-}" \
+  -F "datasetName=${COGNEE_PLUGIN_DATASET:-agent_sessions}" \
+  -F "node_set=user_context" \
+  -F "run_in_background=false" \
+  -F "data=$ARGUMENTS"
 ```
 
 **Project data** (docs, code, company knowledge):
 ```bash
-${VELLUM_PLUGIN_ROOT}/scripts/cognee-remember.sh "$ARGUMENTS" --node-set project_docs
+curl -s -X POST "${COGNEE_BASE_URL:-http://localhost:8011}/api/v1/remember" \
+  -H "X-Api-Key: ${COGNEE_API_KEY:-}" \
+  -F "datasetName=${COGNEE_PLUGIN_DATASET:-agent_sessions}" \
+  -F "node_set=project_docs" \
+  -F "run_in_background=false" \
+  -F "data=$ARGUMENTS"
 ```
 
 **Agent data** (explicit agent notes — routine tool logs are automatic):
 ```bash
-${VELLUM_PLUGIN_ROOT}/scripts/cognee-remember.sh "$ARGUMENTS" --node-set agent_actions
+curl -s -X POST "${COGNEE_BASE_URL:-http://localhost:8011}/api/v1/remember" \
+  -H "X-Api-Key: ${COGNEE_API_KEY:-}" \
+  -F "datasetName=${COGNEE_PLUGIN_DATASET:-agent_sessions}" \
+  -F "node_set=agent_actions" \
+  -F "run_in_background=false" \
+  -F "data=$ARGUMENTS"
 ```
 
-The wrapper POSTs to the running Cognee server (`/api/v1/remember`). A `{"ok": true}` response means the server accepted the data. An error response means the server rejected or failed the request — check `COGNEE_API_KEY` and server logs; do **not** re-run or conclude the data wasn't stored without confirming against the server.
+A `{"ok": true}` response means the server accepted the data. An error response means the server rejected or failed the request — check `COGNEE_API_KEY` and server logs; do **not** re-run or conclude the data wasn't stored without confirming against the server.
 
-**IMPORTANT**: The wrapper always runs in the foreground (`run_in_background=false`) to ensure the full pipeline completes before returning.
-
-## Fallback only — server unreachable
-
-`cognee-cli` is a thin client over the same server. Use it only when the server is genuinely down:
-
-```bash
-cognee-cli remember "$ARGUMENTS" -d "${COGNEE_PLUGIN_DATASET:-agent_sessions}" --node-set user_context
-```
-
-**Empty or clean CLI output does NOT confirm the data was stored.** Verify via the server directly once it is back up.
+**IMPORTANT**: The remember call always runs in the foreground (`run_in_background=false`) to ensure the full pipeline completes before returning.
 
 ## When to use
 

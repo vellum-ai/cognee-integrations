@@ -9,18 +9,22 @@ Bridge session cache entries into the permanent knowledge graph.
 
 ## Instructions
 
-Run the sync script:
+The sync happens automatically at session end via the `shutdown` hook. To trigger a manual sync, use a bash command to POST the session's cached Q&A and trace data to the Cognee server's remember endpoint:
 
 ```bash
-python3 ${VELLUM_PLUGIN_ROOT}/scripts/sync-session-to-graph.py
+curl -s -X POST "${COGNEE_BASE_URL:-http://localhost:8011}/api/v1/remember" \
+  -H "X-Api-Key: ${COGNEE_API_KEY:-}" \
+  -F "datasetName=${COGNEE_PLUGIN_DATASET:-agent_sessions}" \
+  -F "node_set=user_sessions_from_cache" \
+  -F "run_in_background=false" \
+  -F "data=<session QA and trace content>"
 ```
 
 ## What this does
 
-1. **Apply feedback weights** -- session entries with feedback scores update graph node/edge weights
-2. **Persist session Q&A** -- cognifies session text into the permanent graph
-3. **Enrich triplets** -- extracts and indexes triplet embeddings for vector search
-4. **Sync graph to session** -- copies new graph relationships back into the session cache as a knowledge snapshot, so subsequent completions have instant access to the enriched graph context
+1. **Persist session Q&A** — cognifies session text into the permanent graph
+2. **Sync graph to session** — copies new graph relationships back into the session cache as a knowledge snapshot, so subsequent completions have instant access to the enriched graph context
+3. **Dedup by content hash** — already-synced content is skipped
 
 After this, session entries become searchable via the `cognee-search` skill or `cognee_recall` tool, and the graph knowledge is automatically included in session completion prompts.
 

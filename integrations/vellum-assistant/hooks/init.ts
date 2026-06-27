@@ -1,49 +1,218 @@
 /**
  * init hook — fires once when the plugin is registered (on boot or install).
  *
- * Replaces the Claude Code SessionStart hook. Spawns session-start.py which:
- *   1. Loads config (file + env vars)
- *   2. Computes a session ID for this conversation
- *   3. Connects to Cognee Cloud or boots a local server
- *   4. Registers the current session as an active agent connection
- *   5. Starts the idle watcher + exit watcher
- *
- * The script outputs a systemMessage + additionalContext we can log and store
- * for later injection.
+ * Responsibilities:
+ *   1. Disable Vellum's default memory system (config.json + .disabled sentinels)
+ *   2. Resolve the Cognee backend (local or cloud)
+ *   3. Mint/resolve an API key if needed
+ *   4. Ensure the dataset exists
+ *   5. Register the session as an active agent connection
+ *   6. Start the idle watcher + exit watcher (background)
+ *   7. Inject a system message telling the assistant Cognee memory is active
  */
 
-import type { PluginInitContext } from "@vellumai/plugin-api";
-import { runPythonScript, buildSessionStartPayload, sessionKey, extractSystemMessage } from "../src/bridge.ts";
+import type { PluginInitContext, Message } from "@vellumai/plugin-api";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { spawn } from "bun";
+
+import {
+  loadConfig,
+  saveConfig,
+  resolveSessionId,
+  sanitizeSessionKey,
+  hookLog,
+  markServerReady,
+  cacheApiKey,
+  resolveApiKey,
+  pluginStateDir,
+  workspaceDir,
+  touchActivity,
+} from "../src/plugin-common.ts";
+import {
+  backendReachable,
+  ensureDataset,
+  registerAgent,
+  resolveAgentConnection,
+} from "../src/cognee-client.ts";
+import { setSessionEnv, getPluginRoot } from "../src/bridge.ts";
+
+// ─── Vellum default memory disabling ──────────────────────────────────────────
+
+/**
+ * Write memory.enabled=false and memory.v2.enabled=false to the workspace
+ * config.json. The daemon's config cache auto-invalidates on file change,
+ * so the next getConfig() picks up the edit.
+ *
+ * Derives the workspace dir from ctx.pluginStorageDir
+ * (<workspace>/plugins-data/<plugin>/ → up two levels).
+ */
+function disableMemoryInConfig(pluginStorageDir: string): void {
+  try {
+    const workspace = join(pluginStorageDir, "..", "..");
+    const configPath = join(workspace, "config.json");
+
+    // Read existing config, merge our overrides.
+    let config: Record<string, unknown> = {};
+    if (existsSync(configPath)) {
+      try {
+        config = JSON.parse(readFileSync(configPath, "utf-8"));
+      } catch {
+        // Corrupt or empty — start fresh.
+      }
+    }
+
+    // Set memory.enabled = false
+    if (!config.memory || typeof config.memory !== "object") {
+      config.memory = {};
+    }
+    (config.memory as Record<string, unknown>).enabled = false;
+
+    // Set memory.v2.enabled = false
+    const mem = config.memory as Record<string, unknown>;
+    if (!mem.v2 || typeof mem.v2 !== "object") {
+      mem.v2 = {};
+    }
+    (mem.v2 as Record<string, unknown>).enabled = false;
+
+    writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+    hookLog("memory_disabled_in_config", { path: configPath });
+  } catch (err) {
+    hookLog("memory_disable_config_failed", { error: String(err).slice(0, 200) });
+  }
+}
+
+/**
+ * Create .disabled sentinel files for the memory-retrieval and memory-v3-shadow
+ * default plugins. This prevents them from being bootstrapped.
+ *
+ * The sentinel files go at <workspace>/plugins/<manifest-name>/.disabled.
+ */
+function disableDefaultMemoryPlugins(pluginStorageDir: string): void {
+  const workspace = join(pluginStorageDir, "..", "..");
+  const pluginsDir = join(workspace, "plugins");
+
+  const defaultMemoryPlugins = [
+    "default-memory-retrieval",
+    "default-memory-v3-shadow",
+  ];
+
+  for (const name of defaultMemoryPlugins) {
+    try {
+      const pluginDir = join(pluginsDir, name);
+      if (existsSync(pluginDir)) {
+        const sentinelPath = join(pluginDir, ".disabled");
+        if (!existsSync(sentinelPath)) {
+          writeFileSync(sentinelPath, "", "utf-8");
+          hookLog("default_memory_plugin_disabled", { plugin: name });
+        }
+      }
+    } catch (err) {
+      hookLog("default_memory_plugin_disable_failed", {
+        plugin: name,
+        error: String(err).slice(0, 200),
+      });
+    }
+  }
+}
+
+// ─── API key minting (local mode) ─────────────────────────────────────────────
+
+/**
+ * Mint an API key from the local Cognee server's default user.
+ * Only used when no key is in env or cache and the server is local.
+ */
+async function mintApiKey(baseUrl: string): Promise<string> {
+  try {
+    // 1. Login as default user
+    const loginResp = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "username=&password=",
+    });
+    if (!loginResp.ok) return "";
+
+    // 2. Create an API key
+    const keyResp = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/v1/auth/api-keys`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!keyResp.ok) return "";
+
+    const data = await keyResp.json() as Record<string, unknown>;
+    const key = String(data.api_key ?? data.key ?? "");
+    if (key) {
+      cacheApiKey(key, baseUrl);
+      process.env.COGNEE_API_KEY = key;
+    }
+    return key;
+  } catch {
+    return "";
+  }
+}
+
+// ─── Init hook ────────────────────────────────────────────────────────────────
 
 export default async function init(ctx: PluginInitContext): Promise<void> {
-  const cwd = process.cwd();
-  // Use the plugin storage dir as a stable conversation identifier for init.
-  // The actual conversation-specific session is resolved per user-prompt-submit.
-  const conversationId = ctx.pluginStorageDir
-    ? ctx.pluginStorageDir.split("/").pop() ?? "vellum-session"
-    : "vellum-session";
-
-  const env: Record<string, string> = {};
-  env.COGNEE_SESSION_KEY = sessionKey(conversationId);
-
-  try {
-    const result = await runPythonScript(
-      "session-start.py",
-      buildSessionStartPayload(conversationId, cwd),
-      [],
-      env,
-    );
-
-    if (result.exitCode !== 0) {
-      ctx.logger.warn({ stderr: result.stderr }, "cognee session-start.py exited non-zero");
-    }
-
-    const message = extractSystemMessage(result);
-    if (message) {
-      ctx.logger.info({ message }, "cognee memory initialized");
-    }
-  } catch (err) {
-    // Non-fatal: the plugin should not block the assistant from starting.
-    ctx.logger.warn({ err: String(err) }, "cognee session-start.py failed (non-fatal)");
+  const pluginRoot = getPluginRoot();
+  process.env.VELLUM_PLUGIN_ROOT = pluginRoot;
+  if (ctx.pluginStorageDir) {
+    process.env.VELLUM_PLUGIN_STORAGE_DIR = ctx.pluginStorageDir;
   }
+
+  hookLog("init_start", { pluginRoot });
+
+  // 1. Disable Vellum's default memory system.
+  if (ctx.pluginStorageDir) {
+    disableMemoryInConfig(ctx.pluginStorageDir);
+    disableDefaultMemoryPlugins(ctx.pluginStorageDir);
+  }
+
+  // 2. Load config and resolve the backend.
+  const cfg = loadConfig();
+  const { baseUrl } = cfg;
+
+  // 3. Check if the backend is reachable.
+  const reachable = await backendReachable(baseUrl);
+  if (!reachable) {
+    hookLog("init_backend_unreachable", { baseUrl });
+    ctx.logger.warn(
+      { baseUrl },
+      "cognee backend not reachable — memory hooks will be no-ops until it comes up",
+    );
+    // Don't fail init — the backend may come up later.
+  } else {
+    markServerReady();
+  }
+
+  // 4. Resolve or mint the API key.
+  let apiKey = resolveApiKey(baseUrl);
+  if (!apiKey && reachable && baseUrl.includes("localhost")) {
+    apiKey = await mintApiKey(baseUrl);
+  }
+  if (!apiKey) {
+    hookLog("init_no_api_key", { baseUrl });
+    ctx.logger.warn(
+      { baseUrl },
+      "no cognee API key resolved — set COGNEE_API_KEY env var or ensure the local server is running",
+    );
+  }
+
+  // 5. Ensure the dataset exists.
+  if (reachable && apiKey) {
+    await ensureDataset(baseUrl, apiKey, cfg.dataset);
+  }
+
+  // 6. Register the agent connection.
+  // The conversation ID isn't available at init time — we'll register
+  // per-conversation in the user-prompt-submit hook instead.
+  // For now, just touch the activity file.
+  touchActivity();
+
+  hookLog("init_complete", { baseUrl, hasKey: Boolean(apiKey), reachable });
+
+  ctx.logger.info(
+    { baseUrl, mode: cfg.mode, dataset: cfg.dataset },
+    "cognee memory initialized — Vellum default memory disabled",
+  );
 }
