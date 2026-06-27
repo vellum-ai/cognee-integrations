@@ -111,7 +111,13 @@ export function loadConfig(): CogneePluginConfig {
       if (data.mode) cfg.mode = String(data.mode);
     }
   } catch {
-    // No config file yet — that's fine.
+    // No config file yet — write defaults so it exists for future reads.
+    try {
+      mkdirSync(pluginStateDir(), { recursive: true });
+      writeFileSync(configPath(), JSON.stringify(DEFAULT_CONFIG, null, 2), "utf-8");
+    } catch {
+      // Best-effort — don't fail if the dir isn't writable.
+    }
   }
 
   // 2. Env var overrides (higher priority)

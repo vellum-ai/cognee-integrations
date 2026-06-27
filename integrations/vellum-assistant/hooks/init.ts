@@ -101,12 +101,11 @@ function disableDefaultMemoryPlugins(pluginStorageDir: string): void {
   for (const name of defaultMemoryPlugins) {
     try {
       const pluginDir = join(pluginsDir, name);
-      if (existsSync(pluginDir)) {
-        const sentinelPath = join(pluginDir, ".disabled");
-        if (!existsSync(sentinelPath)) {
-          writeFileSync(sentinelPath, "", "utf-8");
-          hookLog("default_memory_plugin_disabled", { plugin: name });
-        }
+      const sentinelPath = join(pluginDir, ".disabled");
+      if (!existsSync(sentinelPath)) {
+        mkdirSync(pluginDir, { recursive: true });
+        writeFileSync(sentinelPath, "", "utf-8");
+        hookLog("default_memory_plugin_disabled", { plugin: name });
       }
     } catch (err) {
       hookLog("default_memory_plugin_disable_failed", {
