@@ -118,6 +118,27 @@ If using local mode, the Cognee server must be running at the configured `COGNEE
 
 If the server is unreachable, all hooks degrade gracefully (no-ops) and the circuit breaker prevents hammering.
 
+### LLM API key (required for graph sync)
+
+The `/api/v1/remember` endpoint (used for session-to-graph sync) runs Cognee's cognify pipeline, which requires an LLM API key on the server. Without it, graph sync will fail with `LLMAPIKeyNotSetError`.
+
+Session memory (`/api/v1/remember/entry` for QA pairs and traces) does **not** require an LLM key and works without one.
+
+To configure the LLM key on the Cognee server:
+
+```bash
+# Via the settings API
+curl -X POST http://localhost:8011/api/v1/settings \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: <key>" \
+  -d '{"llm_api_key":"sk-..."}'
+
+# Or via environment variable on the server process
+export LLM_API_KEY=sk-...
+```
+
+The init hook checks for an LLM key and logs a warning if none is configured.
+
 ## API key resolution
 
 1. `COGNEE_API_KEY` env var (highest priority)

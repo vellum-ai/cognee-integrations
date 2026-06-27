@@ -365,9 +365,10 @@ export async function registerAgent(
         "X-Api-Key": apiKey,
       },
       body: JSON.stringify({
-        handle,
-        dataset: datasets[0] ?? "agent_sessions",
-        datasets,
+        agent_session_name: handle,
+        dataset_names: datasets,
+        type: "api",
+        memory_mode: "hybrid",
       }),
       signal: ctrl.signal,
     });
@@ -397,7 +398,7 @@ export async function unregisterAgent(
         "Content-Type": "application/json",
         "X-Api-Key": apiKey,
       },
-      body: JSON.stringify({ handle }),
+      body: JSON.stringify({ agent_session_name: handle }),
       signal: ctrl.signal,
     });
     clearTimeout(timer);
@@ -426,7 +427,7 @@ export async function ensureDataset(
         "Content-Type": "application/json",
         "X-Api-Key": apiKey,
       },
-      body: JSON.stringify({ datasetName }),
+      body: JSON.stringify({ name: datasetName }),
       signal: ctrl.signal,
     });
     clearTimeout(timer);
@@ -449,6 +450,40 @@ export async function backendReachable(baseUrl: string, timeoutMs = 3_000): Prom
     return resp.status >= 200 && resp.status < 500;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Check whether the Cognee server has an LLM API key configured.
+ * The /api/v1/remember endpoint (graph sync) requires an LLM key for the
+ * cognify pipeline. Without it, session-to-graph sync will fail with
+ * LLMAPIKeyNotSetError. Session cache (remember/entry) works without it.
+ *
+ * Returns true if an LLM key is configured, false if not, null if unknown
+ * (e.g. the settings endpoint is unreachable or requires auth we don't have).
+ */
+export async function checkLlmKey(
+  baseUrl: string,
+  apiKey: string,
+  timeoutMs = 5_000,
+): Promise<boolean | null> {
+  const url = `${baseUrl.replace(/\/+$/, "")}/api/v1/settings`;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const resp = await fetch(url, {
+      headers: { "X-Api-Key": apiKey },
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+
+    if (resp.status !== 200) return null;
+    const data = await resp.json() as Record<string, unknown>;
+    const llm = (data.llm ?? data.llm_provider ?? {}) as Record<string, unknown>;
+    const key = String(llm.api_key ?? llm.apiKey ?? "");
+    return Boolean(key);
+  } catch {
+    return null;
   }
 }
 

@@ -34,6 +34,7 @@ import {
   ensureDataset,
   registerAgent,
   resolveAgentConnection,
+  checkLlmKey,
 } from "../src/cognee-client.ts";
 import { setSessionEnv, getPluginRoot } from "../src/bridge.ts";
 
@@ -203,7 +204,24 @@ export default async function init(ctx: PluginInitContext): Promise<void> {
     await ensureDataset(baseUrl, apiKey, cfg.dataset);
   }
 
-  // 6. Register the agent connection.
+  // 6. Check if the server has an LLM API key configured.
+  // Without it, graph sync (/api/v1/remember) will fail with
+  // LLMAPIKeyNotSetError. Session cache (/api/v1/remember/entry) works fine.
+  if (reachable && apiKey) {
+    const hasLlmKey = await checkLlmKey(baseUrl, apiKey);
+    if (hasLlmKey === false) {
+      hookLog("init_no_llm_key", { baseUrl });
+      ctx.logger.warn(
+        { baseUrl },
+        "cognee server has no LLM API key configured — session-to-graph sync will fail " +
+          "until one is set. Session memory (QA pairs, traces) still works. " +
+          "Set an LLM key on the cognee server via POST /api/v1/settings or " +
+          "the LLM_API_KEY env var on the server process.",
+      );
+    }
+  }
+
+  // 7. Register the agent connection.
   // The conversation ID isn't available at init time — we'll register
   // per-conversation in the user-prompt-submit hook instead.
   // For now, just touch the activity file.
