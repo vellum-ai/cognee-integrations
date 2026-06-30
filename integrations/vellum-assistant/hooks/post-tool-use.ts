@@ -23,11 +23,17 @@ import { storeToolCall, type StoreToolPayload } from "../src/store-to-session.ts
 function resolveToolMeta(
   messages: ReadonlyArray<Message>,
   toolUseId: string,
-): { name: string; input: Record<string, unknown> | undefined } {
+): { name: string; input: unknown } {
   for (const msg of messages) {
-    for (const block of msg.content) {
-      if (block.type === "tool_use" && block.id === toolUseId) {
-        return { name: block.name, input: block.input };
+    const content = msg.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const b = block as Record<string, unknown>;
+      if (b.type === "tool_use" && (b.id === toolUseId || b.tool_use_id === toolUseId)) {
+        return {
+          name: String(b.name ?? b.tool_name ?? "unknown"),
+          input: b.input ?? b.tool_input,
+        };
       }
     }
   }
@@ -41,9 +47,9 @@ export default async function postToolUse(
   setSessionEnv(conversationId);
 
   // Extract tool result fields from the tool_response block.
-  const toolResponse = ctx.toolResponse;
-  const toolUseId = toolResponse.tool_use_id ?? "";
-  const toolOutput = toolResponse.content ?? "";
+  const toolResponse = ctx.toolResponse as Record<string, unknown>;
+  const toolUseId = String(toolResponse.tool_use_id ?? "");
+  const toolOutput = toolResponse.content ?? toolResponse.output ?? "";
 
   // The tool name and input are not on the tool_result — look them up
   // from the conversation history by matching tool_use_id.
