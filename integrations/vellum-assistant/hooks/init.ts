@@ -11,32 +11,27 @@
  *   7. Inject a system message telling the assistant Cognee memory is active
  */
 
-import type { PluginInitContext, Message } from "@vellumai/plugin-api";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { spawn } from "bun";
+import type { InitContext } from "@vellumai/plugin-api";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
-  loadConfig,
+  validateConfig,
   saveConfig,
-  resolveSessionId,
-  sanitizeSessionKey,
   hookLog,
   markServerReady,
   cacheApiKey,
   resolveApiKey,
-  pluginStateDir,
-  workspaceDir,
+  isLocalUrl,
   touchActivity,
 } from "../src/plugin-common.ts";
 import {
   backendReachable,
   ensureDataset,
-  registerAgent,
-  resolveAgentConnection,
   checkLlmKey,
 } from "../src/cognee-client.ts";
-import { setSessionEnv, getPluginRoot } from "../src/bridge.ts";
+import { ensureLocalServer } from "../src/managed-server.ts";
+import { getPluginRoot } from "../src/bridge.ts";
 
 // ─── Vellum default memory disabling ──────────────────────────────────────────
 
@@ -153,7 +148,7 @@ async function mintApiKey(baseUrl: string): Promise<string> {
 
 // ─── Init hook ────────────────────────────────────────────────────────────────
 
-export default async function init(ctx: PluginInitContext): Promise<void> {
+export default async function init(ctx: InitContext): Promise<void> {
   const pluginRoot = getPluginRoot();
   process.env.VELLUM_PLUGIN_ROOT = pluginRoot;
   if (ctx.pluginStorageDir) {
@@ -168,16 +163,37 @@ export default async function init(ctx: PluginInitContext): Promise<void> {
     disableDefaultMemoryPlugins(ctx.pluginStorageDir);
   }
 
-  // 2. Load config and resolve the backend.
-  const cfg = loadConfig();
+  // 2. Validate the host-supplied config (InitContext.config) and resolve the
+  //    backend. No config supplied → a local, assistant-managed server;
+  //    a supplied config → a remote server unless it asks to be managed.
+  const { config: cfg, fromContext, warnings } = validateConfig(ctx.config);
+  for (const w of warnings) {
+    ctx.logger.warn({ field: w }, `cognee config: ${w}`);
+  }
+  // Persist the resolved config so the runtime hooks (which read the state
+  // file via loadConfig) operate on the same values init resolved.
+  saveConfig(cfg);
   const { baseUrl } = cfg;
+  hookLog("init_config", {
+    managed: cfg.managed,
+    mode: cfg.mode,
+    baseUrl,
+    fromContext,
+    warnings: warnings.length,
+  });
 
-  // 3. Check if the backend is reachable.
-  const reachable = await backendReachable(baseUrl);
+  // 3. Bring up (managed) or locate (remote) the backend.
+  let reachable: boolean;
+  if (cfg.managed) {
+    // The plugin owns the lifecycle: provision a venv if needed and spawn it.
+    reachable = await ensureLocalServer(cfg, ctx.logger);
+  } else {
+    reachable = await backendReachable(baseUrl);
+  }
   if (!reachable) {
-    hookLog("init_backend_unreachable", { baseUrl });
+    hookLog("init_backend_unreachable", { baseUrl, managed: cfg.managed });
     ctx.logger.warn(
-      { baseUrl },
+      { baseUrl, managed: cfg.managed },
       "cognee backend not reachable — memory hooks will be no-ops until it comes up",
     );
     // Don't fail init — the backend may come up later.
@@ -187,7 +203,7 @@ export default async function init(ctx: PluginInitContext): Promise<void> {
 
   // 4. Resolve or mint the API key.
   let apiKey = resolveApiKey(baseUrl);
-  if (!apiKey && reachable && baseUrl.includes("localhost")) {
+  if (!apiKey && reachable && isLocalUrl(baseUrl)) {
     apiKey = await mintApiKey(baseUrl);
   }
   if (!apiKey) {
