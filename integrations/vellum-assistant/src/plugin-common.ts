@@ -71,7 +71,39 @@ export function workspaceDir(): string {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
+/**
+ * Spec for a locally managed Cognee server. Only meaningful when
+ * `CogneePluginConfig.managed === true`. The init hook uses this to provision
+ * a venv (if missing) and spawn the server process.
+ */
+export interface CogneeServerSpec {
+  /**
+   * Python interpreter used to create the venv. May be a bare command
+   * resolved from PATH ("python3") or an absolute path. The server itself
+   * runs from the venv's own interpreter, not this one.
+   */
+  python: string;
+  /** Absolute path to the venv the plugin creates and runs the server from. */
+  venvDir: string;
+  /** Host the local server binds to. */
+  host: string;
+  /** Port the local server listens on. */
+  port: number;
+  /** Extra environment variables passed to the server process. */
+  env: Record<string, string>;
+}
+
 export interface CogneePluginConfig {
+  /**
+   * Whether the plugin owns the Cognee server lifecycle. When true the init
+   * hook provisions + spawns a local server from `server`; when false the
+   * plugin assumes an externally managed (remote) server at `baseUrl`.
+   *
+   * Default (no config.json) is `true` — a local, assistant-managed server.
+   * Supplying a config.json flips the default to `false` (remote) unless the
+   * config explicitly sets `managed`.
+   */
+  managed: boolean;
   mode: "local" | "cloud" | "server";
   baseUrl: string;
   apiKey: string;
@@ -79,36 +111,211 @@ export interface CogneePluginConfig {
   agentName: string;
   sessionPrefix: string;
   autoImproveEvery: number;
+  /** Local managed-server spec; consulted only when `managed === true`. */
+  server: CogneeServerSpec;
 }
 
-const DEFAULT_CONFIG: CogneePluginConfig = {
-  mode: "local",
-  baseUrl: "http://localhost:8011",
-  apiKey: "",
-  dataset: "agent_sessions",
-  agentName: "vellum-assistant",
-  sessionPrefix: "vellum",
-  autoImproveEvery: 30,
-};
+const DEFAULT_SERVER_HOST = "127.0.0.1";
+const DEFAULT_SERVER_PORT = 8011;
+
+function defaultServerSpec(): CogneeServerSpec {
+  return {
+    python: "python3",
+    venvDir: join(sharedStateDir(), "server-venv"),
+    host: DEFAULT_SERVER_HOST,
+    port: DEFAULT_SERVER_PORT,
+    env: { COGNEE_AGENT_MODE: "true" },
+  };
+}
+
+function defaultConfig(): CogneePluginConfig {
+  const server = defaultServerSpec();
+  return {
+    managed: true,
+    mode: "local",
+    baseUrl: `http://${server.host}:${server.port}`,
+    apiKey: "",
+    dataset: "agent_sessions",
+    agentName: "vellum-assistant",
+    sessionPrefix: "vellum",
+    autoImproveEvery: 30,
+    server,
+  };
+}
+
+const DEFAULT_CONFIG: CogneePluginConfig = defaultConfig();
 
 function configPath(): string {
   return join(pluginStateDir(), "config.json");
 }
 
+/**
+ * Overlay a raw (snake_case, untrusted) object onto a config in place,
+ * coercing + validating each field. Unknown/wrong-typed fields are skipped
+ * and a human-readable note is pushed to `warnings` so callers can surface
+ * what was ignored. Returns the set of top-level keys that were actually
+ * present in `raw` (so callers can tell "provided" from "defaulted").
+ */
+function applyRawConfig(
+  cfg: CogneePluginConfig,
+  raw: Record<string, unknown>,
+  warnings: string[],
+): Set<string> {
+  const seen = new Set<string>();
+
+  const takeString = (key: string, apply: (v: string) => void) => {
+    if (!(key in raw)) return;
+    seen.add(key);
+    const v = raw[key];
+    if (typeof v === "string" && v.trim()) apply(v.trim());
+    else warnings.push(`"${key}" must be a non-empty string — ignoring`);
+  };
+
+  takeString("base_url", (v) => (cfg.baseUrl = v));
+  takeString("api_key", (v) => (cfg.apiKey = v));
+  takeString("dataset", (v) => (cfg.dataset = v));
+  takeString("agent_name", (v) => (cfg.agentName = v));
+  takeString("session_prefix", (v) => (cfg.sessionPrefix = v));
+
+  if ("mode" in raw) {
+    seen.add("mode");
+    const v = raw.mode;
+    if (v === "local" || v === "cloud" || v === "server") cfg.mode = v;
+    else warnings.push(`"mode" must be one of local|cloud|server — ignoring`);
+  }
+
+  if ("auto_improve_every" in raw) {
+    seen.add("auto_improve_every");
+    const n = Number(raw.auto_improve_every);
+    if (Number.isFinite(n) && n > 0) cfg.autoImproveEvery = n;
+    else warnings.push(`"auto_improve_every" must be a positive number — ignoring`);
+  }
+
+  if ("managed" in raw) {
+    seen.add("managed");
+    const v = raw.managed;
+    if (typeof v === "boolean") cfg.managed = v;
+    else warnings.push(`"managed" must be a boolean — ignoring`);
+  }
+
+  if ("server" in raw) {
+    seen.add("server");
+    const s = raw.server;
+    if (typeof s === "object" && s !== null && !Array.isArray(s)) {
+      const sv = s as Record<string, unknown>;
+      if (typeof sv.python === "string" && sv.python.trim()) cfg.server.python = sv.python.trim();
+      if (typeof sv.venv_dir === "string" && sv.venv_dir.trim()) cfg.server.venvDir = sv.venv_dir.trim();
+      if (typeof sv.host === "string" && sv.host.trim()) cfg.server.host = sv.host.trim();
+      if (sv.port !== undefined) {
+        const p = Number(sv.port);
+        if (Number.isInteger(p) && p > 0 && p < 65536) cfg.server.port = p;
+        else warnings.push(`"server.port" must be a valid port — ignoring`);
+      }
+      if (sv.env !== undefined) {
+        if (typeof sv.env === "object" && sv.env !== null && !Array.isArray(sv.env)) {
+          const env: Record<string, string> = {};
+          for (const [k, val] of Object.entries(sv.env as Record<string, unknown>)) {
+            env[k] = String(val);
+          }
+          cfg.server.env = { ...cfg.server.env, ...env };
+        } else {
+          warnings.push(`"server.env" must be an object — ignoring`);
+        }
+      }
+    } else {
+      warnings.push(`"server" must be an object — ignoring`);
+    }
+  }
+
+  return seen;
+}
+
+/**
+ * Apply environment-variable overrides (highest priority) onto a config.
+ */
+function applyEnvOverrides(cfg: CogneePluginConfig): void {
+  if (process.env.COGNEE_BASE_URL) cfg.baseUrl = process.env.COGNEE_BASE_URL;
+  if (process.env.COGNEE_LOCAL_API_URL && !process.env.COGNEE_BASE_URL) {
+    cfg.baseUrl = process.env.COGNEE_LOCAL_API_URL;
+  }
+  if (process.env.COGNEE_API_KEY) cfg.apiKey = process.env.COGNEE_API_KEY;
+  if (process.env.COGNEE_PLUGIN_DATASET) cfg.dataset = process.env.COGNEE_PLUGIN_DATASET;
+  if (process.env.COGNEE_AGENT_NAME) cfg.agentName = process.env.COGNEE_AGENT_NAME;
+  if (process.env.COGNEE_SESSION_PREFIX) cfg.sessionPrefix = process.env.COGNEE_SESSION_PREFIX;
+  if (process.env.COGNEE_MANAGED) {
+    cfg.managed = process.env.COGNEE_MANAGED === "true" || process.env.COGNEE_MANAGED === "1";
+  }
+}
+
+/**
+ * Result of validating the host-supplied init config (`InitContext.config`).
+ */
+export interface ValidatedConfig {
+  config: CogneePluginConfig;
+  /** True when a non-empty config object was supplied by the host. */
+  fromContext: boolean;
+  /** Human-readable notes about fields that were ignored or coerced. */
+  warnings: string[];
+}
+
+/**
+ * Validate the config the init hook receives from `InitContext.config`.
+ *
+ * The host parses `<pluginDir>/config.json` and hands it over as `unknown`.
+ * This is the authoritative config channel; `loadConfig()` reads the plugin's
+ * own persisted state file for runtime hooks.
+ *
+ * Default policy: no config supplied → a local, assistant-managed server
+ * (`managed: true`). A supplied config flips the default to remote
+ * (`managed: false`) unless it explicitly sets `managed`. When managed, the
+ * base URL is always derived from the server host/port so the two can't drift.
+ */
+export function validateConfig(raw: unknown): ValidatedConfig {
+  const cfg = defaultConfig();
+  const warnings: string[] = [];
+
+  const provided =
+    typeof raw === "object" &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    Object.keys(raw as object).length > 0;
+
+  let explicitManaged = false;
+  if (provided) {
+    const seen = applyRawConfig(cfg, raw as Record<string, unknown>, warnings);
+    explicitManaged = seen.has("managed");
+    // A supplied config defaults to remote unless it asked to be managed.
+    if (!explicitManaged) cfg.managed = false;
+  }
+
+  // Env overrides win over file/context.
+  applyEnvOverrides(cfg);
+  if (process.env.COGNEE_MANAGED) explicitManaged = true;
+
+  // For a managed server, the base URL is owned by the server spec so the
+  // reachability check and the spawned process always agree. An explicit
+  // COGNEE_BASE_URL still wins (lets a managed server bind a custom URL).
+  if (cfg.managed && !process.env.COGNEE_BASE_URL && !process.env.COGNEE_LOCAL_API_URL) {
+    cfg.baseUrl = `http://${cfg.server.host}:${cfg.server.port}`;
+  }
+
+  cfg.mode = isLocalUrl(cfg.baseUrl) ? "local" : "cloud";
+
+  return { config: cfg, fromContext: provided, warnings };
+}
+
 export function loadConfig(): CogneePluginConfig {
-  const cfg = { ...DEFAULT_CONFIG };
+  const cfg = defaultConfig();
 
   // 1. Config file
   try {
     const data = JSON.parse(readFileSync(configPath(), "utf-8"));
-    if (typeof data === "object" && data !== null) {
-      if (data.base_url) cfg.baseUrl = String(data.base_url);
-      if (data.api_key) cfg.apiKey = String(data.api_key);
-      if (data.dataset) cfg.dataset = String(data.dataset);
-      if (data.agent_name) cfg.agentName = String(data.agent_name);
-      if (data.session_prefix) cfg.sessionPrefix = String(data.session_prefix);
-      if (data.auto_improve_every) cfg.autoImproveEvery = Number(data.auto_improve_every);
-      if (data.mode) cfg.mode = String(data.mode);
+    if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+      const warnings: string[] = [];
+      const seen = applyRawConfig(cfg, data as Record<string, unknown>, warnings);
+      // The persisted file is the source of truth for managed-ness once init
+      // has written it. If it predates the managed field, fall back to URL.
+      if (!seen.has("managed")) cfg.managed = isLocalUrl(cfg.baseUrl);
     }
   } catch {
     // No config file yet — write defaults so it exists for future reads.
@@ -121,16 +328,33 @@ export function loadConfig(): CogneePluginConfig {
   }
 
   // 2. Env var overrides (higher priority)
-  if (process.env.COGNEE_BASE_URL) cfg.baseUrl = process.env.COGNEE_BASE_URL;
-  if (process.env.COGNEE_LOCAL_API_URL && !process.env.COGNEE_BASE_URL) {
-    cfg.baseUrl = process.env.COGNEE_LOCAL_API_URL;
-  }
-  if (process.env.COGNEE_API_KEY) cfg.apiKey = process.env.COGNEE_API_KEY;
-  if (process.env.COGNEE_PLUGIN_DATASET) cfg.dataset = process.env.COGNEE_PLUGIN_DATASET;
-  if (process.env.COGNEE_AGENT_NAME) cfg.agentName = process.env.COGNEE_AGENT_NAME;
-  if (process.env.COGNEE_SESSION_PREFIX) cfg.sessionPrefix = process.env.COGNEE_SESSION_PREFIX;
+  applyEnvOverrides(cfg);
 
   return cfg;
+}
+
+/**
+ * Serialize a config to the snake_case shape on disk that `loadConfig` /
+ * `applyRawConfig` read back. Keeps persistence a clean round-trip.
+ */
+function toRawConfig(cfg: CogneePluginConfig): Record<string, unknown> {
+  return {
+    managed: cfg.managed,
+    mode: cfg.mode,
+    base_url: cfg.baseUrl,
+    api_key: cfg.apiKey,
+    dataset: cfg.dataset,
+    agent_name: cfg.agentName,
+    session_prefix: cfg.sessionPrefix,
+    auto_improve_every: cfg.autoImproveEvery,
+    server: {
+      python: cfg.server.python,
+      venv_dir: cfg.server.venvDir,
+      host: cfg.server.host,
+      port: cfg.server.port,
+      env: cfg.server.env,
+    },
+  };
 }
 
 export function saveConfig(cfg: Partial<CogneePluginConfig>): void {
@@ -138,8 +362,12 @@ export function saveConfig(cfg: Partial<CogneePluginConfig>): void {
     const dir = pluginStateDir();
     mkdirSync(dir, { recursive: true });
     const existing = loadConfig();
-    const merged = { ...existing, ...cfg };
-    writeFileSync(configPath(), JSON.stringify(merged, null, 2), "utf-8");
+    const merged: CogneePluginConfig = {
+      ...existing,
+      ...cfg,
+      server: { ...existing.server, ...(cfg.server ?? {}) },
+    };
+    writeFileSync(configPath(), JSON.stringify(toRawConfig(merged), null, 2), "utf-8");
   } catch {
     // Best-effort.
   }
@@ -642,6 +870,52 @@ export function isServerReady(): boolean {
   } catch {
     return false;
   }
+}
+
+// ─── Managed-server PID tracking ──────────────────────────────────────────────
+
+/**
+ * Records the PID of a plugin-spawned (managed) Cognee server so the shutdown
+ * hook can tear it down. Only written when the plugin owns the server
+ * lifecycle (`config.managed === true`).
+ */
+function serverPidPath(): string {
+  return join(sharedStateDir(), "server.pid");
+}
+
+export function writeServerPid(pid: number): void {
+  try {
+    mkdirSync(sharedStateDir(), { recursive: true });
+    writeFileSync(serverPidPath(), JSON.stringify({ pid, ts: Date.now() }), "utf-8");
+  } catch {
+    // Best-effort.
+  }
+}
+
+export function readServerPid(): number | null {
+  try {
+    const data = JSON.parse(readFileSync(serverPidPath(), "utf-8"));
+    const pid = Number(data.pid);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearServerPid(): void {
+  try {
+    const path = serverPidPath();
+    if (existsSync(path)) writeFileSync(path, "", "utf-8");
+  } catch {
+    // Best-effort.
+  }
+}
+
+/**
+ * Path the managed server's stdout/stderr is redirected to.
+ */
+export function serverLogPath(): string {
+  return join(pluginStateDir(), "server.log");
 }
 
 // ─── Git branch detection (for session IDs) ───────────────────────────────────
