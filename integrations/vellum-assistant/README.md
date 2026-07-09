@@ -36,19 +36,13 @@ vellum-assistant/
     cognee-remember/         # Skill: store data in permanent graph
     cognee-search/           # Skill: search memory (uses cognee_recall tool)
     cognee-sync/             # Skill: manual session-to-graph sync
-  tests/
-    test_cognee_client.py    # Tests for cognee-client.ts (ported from Python)
-    test_memory_preference.py
-    test_recall_http.py
-    test_remember_http.py
-    test_session_id.py
 ```
 
 ### Hook mapping
 
 | Hook | Fires | What it does |
 |------|-------|-------------|
-| `init` | Plugin load | Disables Vellum default memory (config.json + .disabled sentinels), resolves backend, mints API key if local |
+| `init` | Plugin load | Disables Vellum default memory (config.json + .disabled sentinels), resolves backend, mints API key if local, passes LLM key to managed server |
 | `user-prompt-submit` | Each user turn | Auto-recalls relevant context from Cognee, injects into messages, stages prompt |
 | `post-tool-use` | After each tool call | Stores tool call as TraceEntry in session cache |
 | `stop` | Turn end | Pairs staged prompt with assistant response as QAEntry, triggers graph sync if threshold reached |
@@ -69,15 +63,15 @@ This works because user plugin `init` hooks run **before** `bootstrapPlugins()` 
 
 ### Circuit breaker
 
-Recall calls go through a file-based circuit breaker (`~/.cognee-plugin/recall-breaker.json`). After 5 consecutive failures (UNREACHABLE or 5xx), the breaker opens for 120 seconds. A reachable 4xx (auth error) does NOT trip the breaker — waiting won't fix a config problem.
+Recall calls go through a file-based circuit breaker (`$VELLUM_WORKSPACE_DIR/.cognee-plugin/recall-breaker.json`). After 5 consecutive failures (UNREACHABLE or 5xx), the breaker opens for 120 seconds. A reachable 4xx (auth error) does NOT trip the breaker — waiting won't fix a config problem.
 
 ### Session management
 
-The host session key (Vellum `conversationId`) maps to a deterministic Cognee session ID via first-writer-wins file creation at `~/.cognee-plugin/vellum-assistant/sessions/<hostKey>.json`. A separate per-launch `conn_uuid` is the registration/liveness handle.
+The host session key (Vellum `conversationId`) maps to a deterministic Cognee session ID via first-writer-wins file creation at `$VELLUM_WORKSPACE_DIR/.cognee-plugin/vellum-assistant/sessions/<hostKey>.json`. A separate per-launch `conn_uuid` is the registration/liveness handle.
 
 ### Plugin directory
 
-The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state lives under `~/.cognee-plugin/` (shared: API key cache, server-ready marker, circuit breaker) and `~/.cognee-plugin/vellum-assistant/` (per-session: config, logs, session maps, bridge cache).
+The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state lives under `$VELLUM_WORKSPACE_DIR/.cognee-plugin/` (shared: API key cache, server-ready marker, circuit breaker) and `$VELLUM_WORKSPACE_DIR/.cognee-plugin/vellum-assistant/` (per-session: config, logs, session maps, bridge cache).
 
 ## Configuration
 
@@ -90,54 +84,125 @@ See [`.env.example`](.env.example) for a full template with comments. Key variab
 | `COGNEE_BASE_URL` | `http://localhost:8011` | Cognee server URL |
 | `COGNEE_API_KEY` | (none) | API key for the Cognee server (or injected from credential store) |
 | `COGNEE_API_KEY_CREDENTIAL` | (none) | Credential reference in `service:field` form (e.g. `cognee:api_key`) |
+| `LLM_API_KEY` | (none) | LLM key for the Cognee server's cognify pipeline (passed to managed server automatically) |
+| `COGNEE_LLM_API_KEY_CREDENTIAL` | (none) | Credential reference for the LLM key (e.g. `openai:api_key`) |
 | `COGNEE_PLUGIN_DATASET` | `agent_sessions` | Dataset name for storage |
 | `COGNEE_AGENT_NAME` | `vellum-assistant` | Agent name for session IDs |
 | `COGNEE_SESSION_PREFIX` | `vellum` | Session ID prefix |
 | `COGNEE_BREAKER_THRESHOLD` | `5` | Failures before circuit opens |
 | `COGNEE_BREAKER_COOLDOWN` | `120` | Seconds before retry after circuit opens |
 | `COGNEE_MANAGED` | (auto) | `true` = plugin manages local server, `false` = external server |
-| `LLM_API_KEY` | (none) | LLM key for the Cognee **server** process (graph sync), not the plugin |
 
 ### Config file
 
-`~/.cognee-plugin/vellum-assistant/config.json` — created on first init, can be edited manually:
+`$VELLUM_WORKSPACE_DIR/.cognee-plugin/vellum-assistant/config.json` — created on first init, can be edited manually:
 
 ```json
 {
   "managed": true,
-  "mode": "local",
-  "base_url": "http://localhost:8011",
-  "api_key": "",
+  "base_url": "http://127.0.0.1:8011",
   "api_key_credential": "",
+  "llm_api_key_credential": "",
   "dataset": "agent_sessions",
   "agent_name": "vellum-assistant",
   "session_prefix": "vellum",
-  "auto_improve_every": 30,
-  "server": {
-    "python": "python3",
-    "venv_dir": "~/.cognee-plugin/server-venv",
-    "host": "127.0.0.1",
-    "port": 8011,
-    "env": { "COGNEE_AGENT_MODE": "true" }
-  }
+  "auto_improve_every": 30
 }
 ```
 
 ### Credential store integration
 
-For Vellum-managed deployments, the plugin supports Vellum's credential store via the `api_key_credential` config field. Set it to a `service:field` reference (e.g. `cognee:api_key`) in the plugin's `config.json`:
+The plugin supports Vellum's credential store for both the Cognee API key and the LLM API key. Set credential references in the plugin's `config.json`:
 
 ```json
 {
-  "api_key_credential": "cognee:api_key",
   "managed": false,
-  "base_url": "https://your-cognee-cloud-instance"
+  "base_url": "https://your-cognee-cloud-instance",
+  "api_key_credential": "cognee:api_key",
+  "llm_api_key_credential": "openai:api_key"
 }
 ```
 
-The Vellum host resolves the credential reference to an env var before the plugin hooks run. The plugin reads the resolved value from `COGNEE_API_KEY` at runtime. This keeps plaintext keys out of config files.
+The Vellum host resolves each credential reference to an env var before the plugin hooks run:
+- `api_key_credential` → `COGNEE_API_KEY` (authenticates the plugin to the Cognee server)
+- `llm_api_key_credential` → `LLM_API_KEY` (used by the Cognee server for graph sync)
 
-For local servers, the `api_key_credential` field can be left empty — the plugin auto-mints a key on first run and caches it at `~/.cognee-plugin/api_key.json`.
+In managed mode, `LLM_API_KEY` is passed through to the spawned Cognee server process automatically. For local servers, `api_key_credential` can be left empty — the plugin auto-mints a key on first run.
+
+## Quick start / reproduction
+
+### Option A: Local managed server (default, zero-config)
+
+No config needed — the plugin provisions a Python venv, installs cognee, and starts a uvicorn server automatically. The only thing you need to provide is an LLM API key for the Cognee server's graph sync pipeline.
+
+```bash
+# 1. Hatch a Vellum assistant (if you don't already have one running)
+vellum hatch vellum --name my-assistant --remote docker --gateway-port 7830 -d
+
+# 2. Install the plugin into the assistant's workspace
+vellum exec my-assistant -- assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant
+
+# 3. Set the LLM API key for the Cognee server (needed for graph sync).
+#    The plugin passes this through to the managed server automatically.
+#    Either export it in the assistant's env, or use the credential store:
+vellum exec my-assistant -- bash -c 'cat > /workspace/.cognee-plugin/vellum-assistant/config.json << EOF
+{
+  "managed": true,
+  "llm_api_key_credential": "openai:api_key"
+}
+EOF'
+
+# 4. Start a conversation to trigger the init hook.
+#    The init hook will:
+#      - Create a Python venv at $VELLUM_WORKSPACE_DIR/.cognee-plugin/server-venv
+#      - Install cognee into it (Python 3.10+ required on the host)
+#      - Start uvicorn on 127.0.0.1:8011 with LLM_API_KEY in its env
+#      - Mint a Cognee API key and cache it
+#      - Disable Vellum's default memory
+vellum exec my-assistant -- vellum message "hello"
+```
+
+### Option B: External / Cognee Cloud server
+
+```bash
+# 1. Hatch a Vellum assistant
+vellum hatch vellum --name my-assistant --remote docker --gateway-port 7830 -d
+
+# 2. Install the plugin
+vellum exec my-assistant -- assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant
+
+# 3. Create a config file pointing to your external server
+vellum exec my-assistant -- bash -c 'mkdir -p /workspace/.cognee-plugin/vellum-assistant && cat > /workspace/.cognee-plugin/vellum-assistant/config.json << EOF
+{
+  "managed": false,
+  "base_url": "https://your-cognee-server-url",
+  "api_key_credential": "cognee:api_key",
+  "llm_api_key_credential": "openai:api_key"
+}
+EOF'
+
+# 4. Start a conversation to trigger init
+vellum exec my-assistant -- vellum message "hello"
+```
+
+### Verifying the plugin is working
+
+```bash
+# Server health (inside the assistant container)
+vellum exec my-assistant -- curl http://localhost:8011/health
+
+# Plugin hook log (JSON lines — one per hook invocation)
+vellum exec my-assistant -- cat /workspace/.cognee-plugin/vellum-assistant/hook.log
+
+# API key cache (local mode auto-mints one)
+vellum exec my-assistant -- cat /workspace/.cognee-plugin/api_key.json
+
+# Server log (managed mode)
+vellum exec my-assistant -- cat /workspace/.cognee-plugin/vellum-assistant/server.log
+
+# Assistant daemon logs
+vellum exec my-assistant -- cat /workspace/data/logs/assistant-$(date +%Y-%m-%d).log | grep cognee
+```
 
 ## Cognee server
 
@@ -148,122 +213,15 @@ If using local mode, the Cognee server must be running at the configured `COGNEE
 
 If the server is unreachable, all hooks degrade gracefully (no-ops) and the circuit breaker prevents hammering.
 
-## Quick start / reproduction
-
-### Prerequisites
-
-- **Vellum Assistant** running (the host daemon)
-- **Python 3.10+** on the machine if using local/managed mode (cognee requires 3.10+)
-- **An LLM API key** (e.g. OpenAI `sk-...`) for the Cognee server's graph sync pipeline
-
-### Option A: Local managed server (default, zero-config)
-
-No config needed — the plugin provisions a venv, installs cognee, and starts a uvicorn server automatically.
-
-```bash
-# 1. Install the plugin into a Vellum workspace
-assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant
-
-# 2. Set the LLM key for the Cognee server (needed for graph sync)
-export LLM_API_KEY=sk-...
-
-# 3. Restart the assistant (or start a new conversation) to trigger the init hook
-# The init hook will:
-#   - Create a Python venv at ~/.cognee-plugin/server-venv
-#   - Install cognee into it
-#   - Start uvicorn on 127.0.0.1:8011
-#   - Mint an API key and cache it
-#   - Disable Vellum's default memory
-
-# 4. Verify the server is up
-curl http://localhost:8011/health
-
-# 5. Check plugin logs
-cat ~/.cognee-plugin/vellum-assistant/hook.log | tail -20
-```
-
-### Option B: External / Cognee Cloud server
-
-```bash
-# 1. Install the plugin
-assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant
-
-# 2. Create a config file pointing to your external server
-mkdir -p ~/.cognee-plugin/vellum-assistant
-cat > ~/.cognee-plugin/vellum-assistant/config.json << 'EOF'
-{
-  "managed": false,
-  "base_url": "https://your-cognee-server-url",
-  "api_key_credential": "cognee:api_key",
-  "dataset": "agent_sessions"
-}
-EOF
-
-# 3. Set the API key (env var or Vellum credential store)
-export COGNEE_API_KEY=your-cognee-api-key
-
-# 4. Restart the assistant to trigger init
-```
-
-### Option C: Manual local server (no auto-management)
-
-```bash
-# 1. Install cognee separately
-pip install cognee>=1.2
-
-# 2. Set the LLM key and start the server
-export LLM_API_KEY=sk-...
-cognee serve --host 127.0.0.1 --port 8011
-
-# 3. Install the plugin with managed=false
-mkdir -p ~/.cognee-plugin/vellum-assistant
-cat > ~/.cognee-plugin/vellum-assistant/config.json << 'EOF'
-{
-  "managed": false,
-  "base_url": "http://127.0.0.1:8011"
-}
-EOF
-
-# 4. Install and restart
-assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant
-```
-
-### Verifying the plugin is working
-
-```bash
-# Server health
-curl http://localhost:8011/health
-
-# Plugin hook log (JSON lines — one per hook invocation)
-cat ~/.cognee-plugin/vellum-assistant/hook.log
-
-# API key cache (local mode auto-mints one)
-cat ~/.cognee-plugin/api_key.json
-
-# Server log (managed mode)
-cat ~/.cognee-plugin/vellum-assistant/server.log
-
-# Circuit breaker state
-cat ~/.cognee-plugin/recall-breaker.json
-```
-
-### Troubleshooting
-
-| Symptom | Check |
-|---------|-------|
-| No memory recall | `hook.log` for `init_backend_unreachable` or `init_no_api_key` |
-| Graph sync fails | Server needs `LLM_API_KEY` set — check `init_no_llm_key` in `hook.log` |
-| Python version error | cognee requires Python 3.10+. Set `COGNEE_PYTHON` to a 3.10+ interpreter |
-| Circuit breaker open | `recall-breaker.json` — wait 120s or delete the file to reset |
-| Plugin not loading | Check daemon logs for plugin load errors |
-
 ### LLM API key (required for graph sync)
 
 The `/api/v1/remember` endpoint (used for session-to-graph sync) runs Cognee's cognify pipeline, which requires an LLM API key on the server. Without it, graph sync will fail with `LLMAPIKeyNotSetError`.
 
 Session memory (`/api/v1/remember/entry` for QA pairs and traces) does **not** require an LLM key and works without one.
 
-To configure the LLM key on the Cognee server:
+**In managed mode**: the plugin passes `LLM_API_KEY` to the spawned server process automatically. Set it via `llm_api_key_credential` in config or the `LLM_API_KEY` env var.
+
+**In remote mode**: configure the LLM key on the Cognee server itself:
 
 ```bash
 # Via the settings API
@@ -281,9 +239,8 @@ The init hook checks for an LLM key and logs a warning if none is configured.
 ## API key resolution
 
 1. `COGNEE_API_KEY` env var (highest priority, also used for credential store injection)
-2. `api_key` in config.json (plaintext, not recommended)
-3. Cached key at `~/.cognee-plugin/api_key.json` (minted on first init for local servers)
-4. For local servers with no key: the init hook mints one via `/api/v1/auth/login` + `/api/v1/auth/api-keys`
+2. Cached key at `$VELLUM_WORKSPACE_DIR/.cognee-plugin/api_key.json` (minted on first init for local servers)
+3. For local servers with no key: the init hook mints one via `/api/v1/auth/login` + `/api/v1/auth/api-keys`
 
 When `api_key_credential` is set in config (e.g. `cognee:api_key`), the Vellum host resolves the credential and injects it as `COGNEE_API_KEY` before hooks run, so it flows through path 1 above.
 

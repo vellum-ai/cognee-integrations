@@ -42,10 +42,16 @@ export function getPluginRoot(): string {
 }
 
 /**
- * Shared state directory (~/.cognee-plugin) for cross-session state like
- * the API key cache, server-ready marker, and circuit breaker.
+ * Shared state directory for cross-session state like the API key cache,
+ * server-ready marker, and circuit breaker. Rooted under the Vellum workspace
+ * directory so state persists across container restarts (Docker hatches only
+ * persist $VELLUM_WORKSPACE_DIR). Falls back to ~/.cognee-plugin only when
+ * the workspace dir can't be determined (e.g. running standalone outside
+ * a Vellum host).
  */
 export function sharedStateDir(): string {
+  const ws = workspaceDir();
+  if (ws) return join(ws, ".cognee-plugin");
   return process.env.COGNEE_PLUGIN_STATE_DIR ?? join(homedir(), ".cognee-plugin");
 }
 
@@ -116,6 +122,14 @@ export interface CogneePluginConfig {
    * or the auto-minted cache for local servers.
    */
   apiKeyCredential: string;
+  /**
+   * Credential reference for the LLM API key that the Cognee server needs
+   * for its cognify pipeline (graph sync). In `service:field` form (e.g.
+   * `openai:api_key`). The Vellum host resolves this to `LLM_API_KEY` env
+   * var, which the managed server inherits via process.env. For remote
+   * servers, the LLM key must be configured on the server itself.
+   */
+  llmApiKeyCredential: string;
   dataset: string;
   agentName: string;
   sessionPrefix: string;
@@ -145,6 +159,7 @@ function defaultConfig(): CogneePluginConfig {
     baseUrl: `http://${server.host}:${server.port}`,
     apiKey: "",
     apiKeyCredential: "",
+    llmApiKeyCredential: "",
     dataset: "agent_sessions",
     agentName: "vellum-assistant",
     sessionPrefix: "vellum",
@@ -184,6 +199,7 @@ function applyRawConfig(
   takeString("base_url", (v) => (cfg.baseUrl = v));
   takeString("api_key", (v) => (cfg.apiKey = v));
   takeString("api_key_credential", (v) => (cfg.apiKeyCredential = v));
+  takeString("llm_api_key_credential", (v) => (cfg.llmApiKeyCredential = v));
   takeString("dataset", (v) => (cfg.dataset = v));
   takeString("agent_name", (v) => (cfg.agentName = v));
   takeString("session_prefix", (v) => (cfg.sessionPrefix = v));
@@ -251,6 +267,7 @@ function applyEnvOverrides(cfg: CogneePluginConfig): void {
   }
   if (process.env.COGNEE_API_KEY) cfg.apiKey = process.env.COGNEE_API_KEY;
   if (process.env.COGNEE_API_KEY_CREDENTIAL) cfg.apiKeyCredential = process.env.COGNEE_API_KEY_CREDENTIAL;
+  if (process.env.COGNEE_LLM_API_KEY_CREDENTIAL) cfg.llmApiKeyCredential = process.env.COGNEE_LLM_API_KEY_CREDENTIAL;
   if (process.env.COGNEE_PLUGIN_DATASET) cfg.dataset = process.env.COGNEE_PLUGIN_DATASET;
   if (process.env.COGNEE_AGENT_NAME) cfg.agentName = process.env.COGNEE_AGENT_NAME;
   if (process.env.COGNEE_SESSION_PREFIX) cfg.sessionPrefix = process.env.COGNEE_SESSION_PREFIX;
@@ -356,6 +373,7 @@ function toRawConfig(cfg: CogneePluginConfig): Record<string, unknown> {
     base_url: cfg.baseUrl,
     api_key: cfg.apiKey,
     api_key_credential: cfg.apiKeyCredential,
+    llm_api_key_credential: cfg.llmApiKeyCredential,
     dataset: cfg.dataset,
     agent_name: cfg.agentName,
     session_prefix: cfg.sessionPrefix,
@@ -571,14 +589,15 @@ export function resolveApiKey(baseUrl: string): string {
 /**
  * Resolve the API key using the full config, including the credential
  * reference. This is the preferred entry point for hooks that have a
- * loaded config — it checks the credential field's env var mapping first,
- * then falls back to the env var and cache.
+ * loaded config.
  *
- * The Vellum host injects resolved credentials as env vars using the
- * field name from the credential reference. For `cognee:api_key`, the
- * host injects `COGNEE_API_KEY`. If the credential is not configured or
- * the host doesn't resolve it, this falls through to the standard
- * resolution chain.
+ * Resolution order:
+ * 1. COGNEE_API_KEY env var (set manually or injected by the Vellum host
+ *    when resolving apiKeyCredential)
+ * 2. Cached key (auto-minted on first init for local servers)
+ *
+ * Plaintext api_key in config is NOT supported — use apiKeyCredential or
+ * the env var instead.
  */
 export function resolveApiKeyFromConfig(cfg: CogneePluginConfig): string {
   // If a credential reference is set, the host should have injected the
@@ -587,10 +606,24 @@ export function resolveApiKeyFromConfig(cfg: CogneePluginConfig): string {
     const envKey = (process.env.COGNEE_API_KEY ?? "").trim();
     if (envKey) return envKey;
   }
-  // Direct apiKey from config (plaintext, not recommended for production).
-  if (cfg.apiKey) return cfg.apiKey;
-  // Env var or cached key.
+  // Env var or cached key (auto-minted for local servers).
   return resolveApiKey(cfg.baseUrl);
+}
+
+/**
+ * Resolve the LLM API key for the Cognee server's cognify pipeline.
+ * In managed mode, this is passed to the spawned server process.
+ * In remote mode, the LLM key must be configured on the server itself.
+ *
+ * The Vellum host resolves llmApiKeyCredential (e.g. `openai:api_key`)
+ * to the LLM_API_KEY env var before hooks run.
+ */
+export function resolveLlmApiKey(cfg: CogneePluginConfig): string {
+  if (cfg.llmApiKeyCredential) {
+    const envKey = (process.env.LLM_API_KEY ?? "").trim();
+    if (envKey) return envKey;
+  }
+  return (process.env.LLM_API_KEY ?? "").trim();
 }
 
 /**

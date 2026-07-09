@@ -29,6 +29,7 @@ import {
   writeServerPid,
   serverLogPath,
   pluginStateDir,
+  resolveLlmApiKey,
 } from "./plugin-common.ts";
 import { backendReachable } from "./cognee-client.ts";
 
@@ -248,8 +249,11 @@ export async function ensureLocalServer(
   const ready = await ensureVenv(python, cfg.server, logger);
   if (!ready) return false;
 
-  // 4. Spawn the server.
-  const pid = spawnServer(cfg.server, logger);
+  // 4. Spawn the server, passing the LLM API key through to the server env.
+  const llmKey = resolveLlmApiKey(cfg);
+  const serverEnv = { ...cfg.server.env };
+  if (llmKey) serverEnv.LLM_API_KEY = llmKey;
+  const pid = spawnServer({ ...cfg.server, env: serverEnv }, logger);
   if (!pid) return false;
 
   // 5. Wait for it to answer the healthcheck.

@@ -22,6 +22,7 @@ import {
   markServerReady,
   cacheApiKey,
   resolveApiKeyFromConfig,
+  resolveLlmApiKey,
   isLocalUrl,
   touchActivity,
 } from "../src/plugin-common.ts";
@@ -220,19 +221,36 @@ export default async function init(ctx: InitContext): Promise<void> {
   }
 
   // 6. Check if the server has an LLM API key configured.
-  // Without it, graph sync (/api/v1/remember) will fail with
-  // LLMAPIKeyNotSetError. Session cache (/api/v1/remember/entry) works fine.
+  // This is the key the Cognee server uses for its cognify pipeline (graph
+  // sync). In managed mode, we pass LLM_API_KEY through to the spawned
+  // server process. In remote mode, it must be configured on the server.
+  // Without it, graph sync will fail with LLMAPIKeyNotSetError. Session
+  // memory (QA pairs, traces) still works without it.
   if (reachable && apiKey) {
-    const hasLlmKey = await checkLlmKey(baseUrl, apiKey);
-    if (hasLlmKey === false) {
-      hookLog("init_no_llm_key", { baseUrl });
+    const llmKey = resolveLlmApiKey(cfg);
+    if (!llmKey && cfg.managed) {
+      hookLog("init_no_llm_key", { baseUrl, managed: cfg.managed });
       ctx.logger.warn(
-        { baseUrl },
-        "cognee server has no LLM API key configured — session-to-graph sync will fail " +
-          "until one is set. Session memory (QA pairs, traces) still works. " +
-          "Set an LLM key on the cognee server via POST /api/v1/settings or " +
-          "the LLM_API_KEY env var on the server process.",
+        { baseUrl, llmApiKeyCredential: cfg.llmApiKeyCredential || "(not set)" },
+        "no LLM API key for managed cognee server — set llm_api_key_credential " +
+          "in config (e.g. \"openai:api_key\") or export LLM_API_KEY. " +
+          "Graph sync will fail without it. Session memory still works.",
       );
+    } else if (!llmKey) {
+      // Remote server — check if it has an LLM key configured.
+      const hasLlmKey = await checkLlmKey(baseUrl, apiKey);
+      if (hasLlmKey === false) {
+        hookLog("init_no_llm_key", { baseUrl, managed: cfg.managed });
+        ctx.logger.warn(
+          { baseUrl },
+          "cognee server has no LLM API key configured — graph sync will fail " +
+            "until one is set. Session memory (QA pairs, traces) still works. " +
+            "Set an LLM key on the cognee server via POST /api/v1/settings or " +
+            "the LLM_API_KEY env var on the server process.",
+        );
+      }
+    } else {
+      hookLog("init_llm_key_resolved", { managed: cfg.managed });
     }
   }
 
