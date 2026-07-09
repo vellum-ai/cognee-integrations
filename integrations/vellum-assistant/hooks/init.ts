@@ -21,7 +21,7 @@ import {
   hookLog,
   markServerReady,
   cacheApiKey,
-  resolveApiKey,
+  resolveApiKeyFromConfig,
   isLocalUrl,
   touchActivity,
 } from "../src/plugin-common.ts";
@@ -202,7 +202,7 @@ export default async function init(ctx: InitContext): Promise<void> {
   }
 
   // 4. Resolve or mint the API key.
-  let apiKey = resolveApiKey(baseUrl);
+  let apiKey = resolveApiKeyFromConfig(cfg);
   if (!apiKey && reachable && isLocalUrl(baseUrl)) {
     apiKey = await mintApiKey(baseUrl);
   }

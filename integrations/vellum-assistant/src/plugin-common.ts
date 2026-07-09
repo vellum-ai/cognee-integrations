@@ -107,6 +107,15 @@ export interface CogneePluginConfig {
   mode: "local" | "cloud" | "server";
   baseUrl: string;
   apiKey: string;
+  /**
+   * Credential reference in `service:field` form (e.g. `cognee:api_key`).
+   * When set, the Vellum host resolves this to an env var at runtime and the
+   * plugin reads the resolved value via `process.env`. This is the preferred
+   * way to supply the Cognee API key in Vellum environments — the plaintext
+   * key never appears in config.json. Falls back to `COGNEE_API_KEY` env var
+   * or the auto-minted cache for local servers.
+   */
+  apiKeyCredential: string;
   dataset: string;
   agentName: string;
   sessionPrefix: string;
@@ -135,6 +144,7 @@ function defaultConfig(): CogneePluginConfig {
     mode: "local",
     baseUrl: `http://${server.host}:${server.port}`,
     apiKey: "",
+    apiKeyCredential: "",
     dataset: "agent_sessions",
     agentName: "vellum-assistant",
     sessionPrefix: "vellum",
@@ -173,6 +183,7 @@ function applyRawConfig(
 
   takeString("base_url", (v) => (cfg.baseUrl = v));
   takeString("api_key", (v) => (cfg.apiKey = v));
+  takeString("api_key_credential", (v) => (cfg.apiKeyCredential = v));
   takeString("dataset", (v) => (cfg.dataset = v));
   takeString("agent_name", (v) => (cfg.agentName = v));
   takeString("session_prefix", (v) => (cfg.sessionPrefix = v));
@@ -239,6 +250,7 @@ function applyEnvOverrides(cfg: CogneePluginConfig): void {
     cfg.baseUrl = process.env.COGNEE_LOCAL_API_URL;
   }
   if (process.env.COGNEE_API_KEY) cfg.apiKey = process.env.COGNEE_API_KEY;
+  if (process.env.COGNEE_API_KEY_CREDENTIAL) cfg.apiKeyCredential = process.env.COGNEE_API_KEY_CREDENTIAL;
   if (process.env.COGNEE_PLUGIN_DATASET) cfg.dataset = process.env.COGNEE_PLUGIN_DATASET;
   if (process.env.COGNEE_AGENT_NAME) cfg.agentName = process.env.COGNEE_AGENT_NAME;
   if (process.env.COGNEE_SESSION_PREFIX) cfg.sessionPrefix = process.env.COGNEE_SESSION_PREFIX;
@@ -343,6 +355,7 @@ function toRawConfig(cfg: CogneePluginConfig): Record<string, unknown> {
     mode: cfg.mode,
     base_url: cfg.baseUrl,
     api_key: cfg.apiKey,
+    api_key_credential: cfg.apiKeyCredential,
     dataset: cfg.dataset,
     agent_name: cfg.agentName,
     session_prefix: cfg.sessionPrefix,
@@ -539,7 +552,15 @@ export function cacheApiKey(apiKey: string, baseUrl: string): void {
 
 /**
  * Resolve the API key for HTTP calls.
- * Priority: 1. env var, 2. cached key.
+ * Priority: 1. env var (COGNEE_API_KEY), 2. credential-resolved env var,
+ * 3. cached key (minted on first init for local servers).
+ *
+ * The credential path works as follows: the config field `apiKeyCredential`
+ * holds a `service:field` reference (e.g. `cognee:api_key`). The Vellum host
+ * resolves this to an env var before the plugin hooks run. At runtime we
+ * check the env var that the host would inject — `COGNEE_API_KEY` — which
+ * is the same channel as a manually-set env var. This means the credential
+ * store path and the manual env var path converge on the same resolution.
  */
 export function resolveApiKey(baseUrl: string): string {
   const envKey = (process.env.COGNEE_API_KEY ?? "").trim();
@@ -548,12 +569,37 @@ export function resolveApiKey(baseUrl: string): string {
 }
 
 /**
+ * Resolve the API key using the full config, including the credential
+ * reference. This is the preferred entry point for hooks that have a
+ * loaded config — it checks the credential field's env var mapping first,
+ * then falls back to the env var and cache.
+ *
+ * The Vellum host injects resolved credentials as env vars using the
+ * field name from the credential reference. For `cognee:api_key`, the
+ * host injects `COGNEE_API_KEY`. If the credential is not configured or
+ * the host doesn't resolve it, this falls through to the standard
+ * resolution chain.
+ */
+export function resolveApiKeyFromConfig(cfg: CogneePluginConfig): string {
+  // If a credential reference is set, the host should have injected the
+  // resolved value into COGNEE_API_KEY. Check there first.
+  if (cfg.apiKeyCredential) {
+    const envKey = (process.env.COGNEE_API_KEY ?? "").trim();
+    if (envKey) return envKey;
+  }
+  // Direct apiKey from config (plaintext, not recommended for production).
+  if (cfg.apiKey) return cfg.apiKey;
+  // Env var or cached key.
+  return resolveApiKey(cfg.baseUrl);
+}
+
+/**
  * Resolve the HTTP endpoint (baseUrl + apiKey) for runtime calls.
  */
 export function resolveHttpEndpoint(): { baseUrl: string; apiKey: string } {
   const cfg = loadConfig();
   const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
-  const apiKey = resolveApiKey(baseUrl);
+  const apiKey = resolveApiKeyFromConfig(cfg);
   return { baseUrl, apiKey };
 }
 
