@@ -16,7 +16,7 @@ vellum hatch --name my-assistant --remote docker -d
 vellum exec my-assistant -- assistant credentials set sk-... --service cognee --field llm_api_key
 
 # 3. Install the plugin (triggers the init hook, which provisions and starts the server)
-vellum exec my-assistant -- assistant plugins install cognee
+vellum exec my-assistant -- assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant --name cognee
 
 # 4. Start a conversation
 vellum message my-assistant "hello"
@@ -34,7 +34,7 @@ vellum exec my-assistant -- assistant credentials set sk-... --service cognee --
 vellum exec my-assistant -- assistant credentials set https://your-cognee-server-url --service cognee --field base_url
 
 # 3. Install the plugin (auto-detects cloud mode from the base_url credential)
-vellum exec my-assistant -- assistant plugins install cognee
+vellum exec my-assistant -- assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant --name cognee
 
 # 4. Start a conversation
 vellum message my-assistant "hello"
