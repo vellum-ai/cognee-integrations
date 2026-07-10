@@ -152,18 +152,3 @@ The init hook checks for an LLM key and logs a warning if none is configured.
 2. `COGNEE_API_KEY` env var (manual override)
 3. Cached key at `$VELLUM_WORKSPACE_DIR/plugins/cognee/data/api_key.json` (auto-minted on first init for local servers)
 4. For local servers with no key: the init hook mints one via `/api/v1/auth/login` + `/api/v1/auth/api-keys`
-
-## Diff from Claude Code integration
-
-This integration is adapted from the [Claude Code cognee plugin](../claude-code/). Key differences:
-
-| Aspect | Claude Code | Vellum Assistant |
-|--------|-------------|-------------------|
-| Language | Python scripts + shell wrappers | TypeScript (Bun) |
-| Hooks | JSON-configured subprocess hooks | TypeScript hooks (in-process) |
-| Manifest | `.claude-plugin/plugin.json` + `hooks/hooks.json` | `package.json` |
-| Tools | Agent definition (markdown) | `ToolDefinition` (TypeScript) |
-| Memory disabling | N/A | Disables Vellum default memory via config + sentinels |
-| Plugin dir | `~/.claude/plugins/` | `$VELLUM_WORKSPACE_DIR/plugins/cognee/` |
-| Session key | Claude session ID | Vellum `conversationId` |
-| Server management | External (user-run) | Local mode: plugin provisions venv + spawns uvicorn. Cloud mode: external. |

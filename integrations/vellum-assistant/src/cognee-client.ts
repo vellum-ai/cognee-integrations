@@ -29,12 +29,8 @@ export interface CogneeConfig {
 const THRESHOLD = Number(process.env.COGNEE_BREAKER_THRESHOLD ?? 5);
 const COOLDOWN = Number(process.env.COGNEE_BREAKER_COOLDOWN ?? 120);
 
-function stateDir(): string {
-  return sharedStateDir();
-}
-
 function breakerPath(): string {
-  return join(stateDir(), "recall-breaker.json");
+  return join(sharedStateDir(), "recall-breaker.json");
 }
 
 interface BreakerState {
