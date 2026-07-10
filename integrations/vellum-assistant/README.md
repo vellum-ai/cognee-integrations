@@ -2,6 +2,51 @@
 
 Cognee knowledge graph memory for Vellum Assistant. Session-aware storage, auto-routing recall, and persistent learning across sessions. Supports local mode (self-hosted Cognee server) and Cognee Cloud.
 
+## Quick start
+
+### Option A: Local mode (default, zero-config server)
+
+The plugin provisions a Python venv, installs cognee, and starts a uvicorn server automatically. The only thing you need to provide is an LLM API key for the Cognee server's graph sync pipeline.
+
+```bash
+# 1. Hatch a Vellum assistant
+vellum hatch --name my-assistant --remote docker -d
+
+# 2. Store the LLM API key the Cognee server will use for graph sync
+vellum exec my-assistant -- assistant credentials set sk-... --service cognee --field llm_api_key
+
+# 3. Install the plugin (triggers the init hook, which provisions and starts the server)
+vellum exec my-assistant -- assistant plugins install cognee
+
+# 4. Start a conversation
+vellum message my-assistant "hello"
+```
+
+### Option B: External / Cognee Cloud server
+
+```bash
+# 1. Hatch a Vellum assistant
+vellum hatch --name my-assistant --remote docker -d
+
+# 2. Store the Cognee API key and LLM API key
+vellum exec my-assistant -- assistant credentials set your-cognee-api-key --service cognee --field api_key
+vellum exec my-assistant -- assistant credentials set sk-... --service cognee --field llm_api_key
+
+# 3. Install the plugin
+vellum exec my-assistant -- assistant plugins install cognee
+
+# 4. Configure the plugin to point at the external server
+vellum exec my-assistant -- bash -c 'cat > /workspace/plugins/cognee/config.json << EOF
+{
+  "mode": "cloud",
+  "base_url": "https://your-cognee-server-url"
+}
+EOF'
+
+# 5. Start a conversation
+vellum message my-assistant "hello"
+```
+
 ## Architecture
 
 This is a **pure TypeScript** plugin — no Python, no subprocess. All logic runs in-process under Bun, using Bun's native `fetch` for HTTP calls to the Cognee API.
@@ -109,51 +154,6 @@ The plugin resolves credentials via `assistant credentials reveal --service <s> 
 
 - **`api_key_credential`** (e.g. `cognee:api_key`) — authenticates the plugin to the Cognee server. For local servers, can be left empty (auto-minted on first run).
 - **`llm_api_key_credential`** (e.g. `openai:api_key`) — the LLM key the Cognee server needs for its cognify pipeline (graph sync). In local mode, the plugin passes this to the spawned server as `COGNEE_LLM_API_KEY`. For remote servers, configure the LLM key on the server itself.
-
-## Quick start
-
-### Option A: Local mode (default, zero-config server)
-
-The plugin provisions a Python venv, installs cognee, and starts a uvicorn server automatically. The only thing you need to provide is an LLM API key for the Cognee server's graph sync pipeline.
-
-```bash
-# 1. Hatch a Vellum assistant
-vellum hatch --name my-assistant --remote docker -d
-
-# 2. Store the LLM API key the Cognee server will use for graph sync
-vellum exec my-assistant -- assistant credentials set sk-... --service cognee --field llm_api_key
-
-# 3. Install the plugin (triggers the init hook, which provisions and starts the server)
-vellum exec my-assistant -- assistant plugins install cognee
-
-# 4. Start a conversation
-vellum message my-assistant "hello"
-```
-
-### Option B: External / Cognee Cloud server
-
-```bash
-# 1. Hatch a Vellum assistant
-vellum hatch --name my-assistant --remote docker -d
-
-# 2. Store the Cognee API key and LLM API key
-vellum exec my-assistant -- assistant credentials set your-cognee-api-key --service cognee --field api_key
-vellum exec my-assistant -- assistant credentials set sk-... --service cognee --field llm_api_key
-
-# 3. Install the plugin
-vellum exec my-assistant -- assistant plugins install cognee
-
-# 4. Configure the plugin to point at the external server
-vellum exec my-assistant -- bash -c 'cat > /workspace/plugins/cognee/config.json << EOF
-{
-  "mode": "cloud",
-  "base_url": "https://your-cognee-server-url"
-}
-EOF'
-
-# 5. Start a conversation
-vellum message my-assistant "hello"
-```
 
 ## Cognee server
 
