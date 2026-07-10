@@ -143,7 +143,7 @@ export async function storeToolCall(payload: StoreToolPayload): Promise<void> {
     return;
   }
 
-  const { baseUrl, apiKey } = resolveHttpEndpoint();
+  const { baseUrl, apiKey } = await resolveHttpEndpoint();
   if (!apiKey) {
     hookLog("store_tool_no_api_key", { tool: toolName });
     return;
@@ -214,7 +214,7 @@ export async function storeAssistantStop(payload: StoreStopPayload): Promise<voi
   }
 
   const sessionKey = getSessionKey() || sanitizeSessionKey(payload.conversationId ?? "");
-  const { baseUrl, apiKey } = resolveHttpEndpoint();
+  const { baseUrl, apiKey } = await resolveHttpEndpoint();
   if (!apiKey) {
     hookLog("store_stop_no_api_key");
     return;

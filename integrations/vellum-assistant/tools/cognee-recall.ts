@@ -61,7 +61,7 @@ export const cogneeRecall: ToolDefinition = {
     }
 
     const cfg = loadConfig();
-    const { baseUrl, apiKey } = resolveHttpEndpoint();
+    const { baseUrl, apiKey } = await resolveHttpEndpoint();
 
     if (!apiKey) {
       return {

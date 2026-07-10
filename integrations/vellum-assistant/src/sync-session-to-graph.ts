@@ -199,7 +199,7 @@ export async function syncSessionToGraph(
 
   hookLog("sync_start", { session: sessionId, dataset, unregisterOnFinish });
 
-  const { baseUrl } = resolveHttpEndpoint();
+  const { baseUrl } = await resolveHttpEndpoint();
   const apiKey = resolveApiKey(baseUrl);
   if (!apiKey) {
     hookLog("sync_no_api_key", { baseUrl });

@@ -169,7 +169,7 @@ export async function searchContext(
     return null;
   }
 
-  const { baseUrl, apiKey } = resolveHttpEndpoint();
+  const { baseUrl, apiKey } = await resolveHttpEndpoint();
   if (!apiKey) {
     hookLog("context_lookup_no_api_key");
     return null;

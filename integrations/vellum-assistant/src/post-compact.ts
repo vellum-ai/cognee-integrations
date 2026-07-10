@@ -162,7 +162,7 @@ export async function postCompact(conversationId: string): Promise<string | null
     return null;
   }
 
-  const { baseUrl, apiKey } = resolveHttpEndpoint();
+  const { baseUrl, apiKey } = await resolveHttpEndpoint();
   if (!apiKey) {
     hookLog("precompact_no_api_key");
     return null;

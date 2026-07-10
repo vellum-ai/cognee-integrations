@@ -25,7 +25,7 @@ import { syncSessionToGraph } from "../src/sync-session-to-graph.ts";
  */
 function stopManagedServer(): void {
   const cfg = loadConfig();
-  if (!cfg.managed) return;
+  if (cfg.mode !== "local") return;
 
   const pid = readServerPid();
   if (!pid) return;

@@ -79,7 +79,7 @@ export function workspaceDir(): string {
 
 /**
  * Spec for a locally managed Cognee server. Only meaningful when
- * `CogneePluginConfig.managed === true`. The init hook uses this to provision
+ * `CogneePluginConfig.mode === "local"`. The init hook uses this to provision
  * a venv (if missing) and spawn the server process.
  */
 export interface CogneeServerSpec {
@@ -101,32 +101,26 @@ export interface CogneeServerSpec {
 
 export interface CogneePluginConfig {
   /**
-   * Whether the plugin owns the Cognee server lifecycle. When true the init
-   * hook provisions + spawns a local server from `server`; when false the
-   * plugin assumes an externally managed (remote) server at `baseUrl`.
+   * Server mode. `local` = the plugin owns the server lifecycle (provisions
+   * a venv, installs cognee, spawns uvicorn). `cloud` or `server` = an
+   * externally managed server at `baseUrl`.
    *
-   * Default (no config.json) is `true` — a local, assistant-managed server.
-   * Supplying a config.json flips the default to `false` (remote) unless the
-   * config explicitly sets `managed`.
+   * Default (no config.json) is `local`. Supplying a config with a non-local
+   * `base_url` flips this to `cloud`.
    */
-  managed: boolean;
   mode: "local" | "cloud" | "server";
   baseUrl: string;
-  apiKey: string;
   /**
    * Credential reference in `service:field` form (e.g. `cognee:api_key`).
-   * When set, the Vellum host resolves this to an env var at runtime and the
-   * plugin reads the resolved value via `process.env`. This is the preferred
-   * way to supply the Cognee API key in Vellum environments — the plaintext
-   * key never appears in config.json. Falls back to `COGNEE_API_KEY` env var
-   * or the auto-minted cache for local servers.
+   * Resolved at runtime via `assistant credentials reveal --service <s> --field <f>`.
+   * Falls back to `COGNEE_API_KEY` env var or the auto-minted cache for local servers.
    */
   apiKeyCredential: string;
   /**
    * Credential reference for the LLM API key that the Cognee server needs
    * for its cognify pipeline (graph sync). In `service:field` form (e.g.
-   * `openai:api_key`). The Vellum host resolves this to `LLM_API_KEY` env
-   * var, which the managed server inherits via process.env. For remote
+   * `openai:api_key`). Resolved via `assistant credentials reveal` and
+   * passed to the managed server as `COGNEE_LLM_API_KEY`. For remote
    * servers, the LLM key must be configured on the server itself.
    */
   llmApiKeyCredential: string;
@@ -134,7 +128,7 @@ export interface CogneePluginConfig {
   agentName: string;
   sessionPrefix: string;
   autoImproveEvery: number;
-  /** Local managed-server spec; consulted only when `managed === true`. */
+  /** Local server spec; consulted only when `mode === "local"`. */
   server: CogneeServerSpec;
 }
 
@@ -154,10 +148,8 @@ function defaultServerSpec(): CogneeServerSpec {
 function defaultConfig(): CogneePluginConfig {
   const server = defaultServerSpec();
   return {
-    managed: true,
     mode: "local",
     baseUrl: `http://${server.host}:${server.port}`,
-    apiKey: "",
     apiKeyCredential: "",
     llmApiKeyCredential: "",
     dataset: "agent_sessions",
@@ -171,7 +163,7 @@ function defaultConfig(): CogneePluginConfig {
 const DEFAULT_CONFIG: CogneePluginConfig = defaultConfig();
 
 function configPath(): string {
-  return join(pluginStateDir(), "config.json");
+  return join(getPluginRoot(), "config.json");
 }
 
 /**
@@ -197,7 +189,6 @@ function applyRawConfig(
   };
 
   takeString("base_url", (v) => (cfg.baseUrl = v));
-  takeString("api_key", (v) => (cfg.apiKey = v));
   takeString("api_key_credential", (v) => (cfg.apiKeyCredential = v));
   takeString("llm_api_key_credential", (v) => (cfg.llmApiKeyCredential = v));
   takeString("dataset", (v) => (cfg.dataset = v));
@@ -216,13 +207,6 @@ function applyRawConfig(
     const n = Number(raw.auto_improve_every);
     if (Number.isFinite(n) && n > 0) cfg.autoImproveEvery = n;
     else warnings.push(`"auto_improve_every" must be a positive number — ignoring`);
-  }
-
-  if ("managed" in raw) {
-    seen.add("managed");
-    const v = raw.managed;
-    if (typeof v === "boolean") cfg.managed = v;
-    else warnings.push(`"managed" must be a boolean — ignoring`);
   }
 
   if ("server" in raw) {
@@ -265,15 +249,15 @@ function applyEnvOverrides(cfg: CogneePluginConfig): void {
   if (process.env.COGNEE_LOCAL_API_URL && !process.env.COGNEE_BASE_URL) {
     cfg.baseUrl = process.env.COGNEE_LOCAL_API_URL;
   }
-  if (process.env.COGNEE_API_KEY) cfg.apiKey = process.env.COGNEE_API_KEY;
+  if (process.env.COGNEE_MODE) {
+    const m = process.env.COGNEE_MODE;
+    if (m === "local" || m === "cloud" || m === "server") cfg.mode = m;
+  }
   if (process.env.COGNEE_API_KEY_CREDENTIAL) cfg.apiKeyCredential = process.env.COGNEE_API_KEY_CREDENTIAL;
   if (process.env.COGNEE_LLM_API_KEY_CREDENTIAL) cfg.llmApiKeyCredential = process.env.COGNEE_LLM_API_KEY_CREDENTIAL;
   if (process.env.COGNEE_PLUGIN_DATASET) cfg.dataset = process.env.COGNEE_PLUGIN_DATASET;
   if (process.env.COGNEE_AGENT_NAME) cfg.agentName = process.env.COGNEE_AGENT_NAME;
   if (process.env.COGNEE_SESSION_PREFIX) cfg.sessionPrefix = process.env.COGNEE_SESSION_PREFIX;
-  if (process.env.COGNEE_MANAGED) {
-    cfg.managed = process.env.COGNEE_MANAGED === "true" || process.env.COGNEE_MANAGED === "1";
-  }
 }
 
 /**
@@ -294,10 +278,10 @@ export interface ValidatedConfig {
  * This is the authoritative config channel; `loadConfig()` reads the plugin's
  * own persisted state file for runtime hooks.
  *
- * Default policy: no config supplied → a local, assistant-managed server
- * (`managed: true`). A supplied config flips the default to remote
- * (`managed: false`) unless it explicitly sets `managed`. When managed, the
- * base URL is always derived from the server host/port so the two can't drift.
+ * Default policy: no config supplied → `mode: "local"` (plugin manages the
+ * server). A supplied config with a non-local `base_url` flips to `cloud`
+ * unless it explicitly sets `mode`. In local mode, the base URL is always
+ * derived from the server host/port so the two can't drift.
  */
 export function validateConfig(raw: unknown): ValidatedConfig {
   const cfg = defaultConfig();
@@ -309,26 +293,23 @@ export function validateConfig(raw: unknown): ValidatedConfig {
     !Array.isArray(raw) &&
     Object.keys(raw as object).length > 0;
 
-  let explicitManaged = false;
+  let explicitMode = false;
   if (provided) {
     const seen = applyRawConfig(cfg, raw as Record<string, unknown>, warnings);
-    explicitManaged = seen.has("managed");
-    // A supplied config defaults to remote unless it asked to be managed.
-    if (!explicitManaged) cfg.managed = false;
+    explicitMode = seen.has("mode");
+    // A supplied config defaults to cloud unless it explicitly set local mode.
+    if (!explicitMode) cfg.mode = isLocalUrl(cfg.baseUrl) ? "local" : "cloud";
   }
 
   // Env overrides win over file/context.
   applyEnvOverrides(cfg);
-  if (process.env.COGNEE_MANAGED) explicitManaged = true;
 
-  // For a managed server, the base URL is owned by the server spec so the
+  // For a local server, the base URL is owned by the server spec so the
   // reachability check and the spawned process always agree. An explicit
-  // COGNEE_BASE_URL still wins (lets a managed server bind a custom URL).
-  if (cfg.managed && !process.env.COGNEE_BASE_URL && !process.env.COGNEE_LOCAL_API_URL) {
+  // COGNEE_BASE_URL still wins (lets a local server bind a custom URL).
+  if (cfg.mode === "local" && !process.env.COGNEE_BASE_URL && !process.env.COGNEE_LOCAL_API_URL) {
     cfg.baseUrl = `http://${cfg.server.host}:${cfg.server.port}`;
   }
-
-  cfg.mode = isLocalUrl(cfg.baseUrl) ? "local" : "cloud";
 
   return { config: cfg, fromContext: provided, warnings };
 }
@@ -342,9 +323,9 @@ export function loadConfig(): CogneePluginConfig {
     if (typeof data === "object" && data !== null && !Array.isArray(data)) {
       const warnings: string[] = [];
       const seen = applyRawConfig(cfg, data as Record<string, unknown>, warnings);
-      // The persisted file is the source of truth for managed-ness once init
-      // has written it. If it predates the managed field, fall back to URL.
-      if (!seen.has("managed")) cfg.managed = isLocalUrl(cfg.baseUrl);
+      // The persisted file is the source of truth for mode once init has
+      // written it. If it predates the mode field, derive from URL.
+      if (!seen.has("mode")) cfg.mode = isLocalUrl(cfg.baseUrl) ? "local" : "cloud";
     }
   } catch {
     // No config file yet — write defaults so it exists for future reads.
@@ -368,10 +349,8 @@ export function loadConfig(): CogneePluginConfig {
  */
 function toRawConfig(cfg: CogneePluginConfig): Record<string, unknown> {
   return {
-    managed: cfg.managed,
     mode: cfg.mode,
     base_url: cfg.baseUrl,
-    api_key: cfg.apiKey,
     api_key_credential: cfg.apiKeyCredential,
     llm_api_key_credential: cfg.llmApiKeyCredential,
     dataset: cfg.dataset,
@@ -586,53 +565,87 @@ export function resolveApiKey(baseUrl: string): string {
   return loadCachedApiKey(baseUrl);
 }
 
+// ─── Credential store resolution ──────────────────────────────────────────────
+
+import { spawn } from "bun";
+
+/**
+ * Resolve a credential reference (e.g. `cognee:api_key`) to its plaintext
+ * value using the `assistant credentials reveal` CLI. This is the actual
+ * resolution path — the plugin calls the CLI directly rather than relying on
+ * the host to inject env vars.
+ *
+ * Returns the plaintext value, or empty string if the credential is not found
+ * or the CLI is unavailable. Never throws.
+ */
+async function resolveCredential(credentialRef: string): Promise<string> {
+  if (!credentialRef || !credentialRef.includes(":")) return "";
+  const [service, field] = credentialRef.split(":", 2);
+  if (!service || !field) return "";
+
+  try {
+    const proc = spawn({
+      cmd: ["assistant", "credentials", "reveal", "--service", service, "--field", field, "--json"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, , code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (code !== 0) return "";
+    const data = JSON.parse(stdout) as Record<string, unknown>;
+    if (data.ok === true) return String(data.value ?? "");
+    return "";
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Resolve the API key using the full config, including the credential
  * reference. This is the preferred entry point for hooks that have a
  * loaded config.
  *
  * Resolution order:
- * 1. COGNEE_API_KEY env var (set manually or injected by the Vellum host
- *    when resolving apiKeyCredential)
- * 2. Cached key (auto-minted on first init for local servers)
- *
- * Plaintext api_key in config is NOT supported — use apiKeyCredential or
- * the env var instead.
+ * 1. Credential store (via `assistant credentials reveal` if apiKeyCredential is set)
+ * 2. COGNEE_API_KEY env var (manual override)
+ * 3. Cached key (auto-minted on first init for local servers)
  */
-export function resolveApiKeyFromConfig(cfg: CogneePluginConfig): string {
-  // If a credential reference is set, the host should have injected the
-  // resolved value into COGNEE_API_KEY. Check there first.
+export async function resolveApiKeyFromConfig(cfg: CogneePluginConfig): Promise<string> {
   if (cfg.apiKeyCredential) {
-    const envKey = (process.env.COGNEE_API_KEY ?? "").trim();
-    if (envKey) return envKey;
+    const credKey = await resolveCredential(cfg.apiKeyCredential);
+    if (credKey) return credKey;
   }
-  // Env var or cached key (auto-minted for local servers).
   return resolveApiKey(cfg.baseUrl);
 }
 
 /**
  * Resolve the LLM API key for the Cognee server's cognify pipeline.
- * In managed mode, this is passed to the spawned server process.
- * In remote mode, the LLM key must be configured on the server itself.
+ * In local mode, this is passed to the spawned server process as
+ * COGNEE_LLM_API_KEY. In cloud/server mode, the LLM key must be
+ * configured on the server itself.
  *
- * The Vellum host resolves llmApiKeyCredential (e.g. `openai:api_key`)
- * to the LLM_API_KEY env var before hooks run.
+ * Resolution order:
+ * 1. Credential store (via `assistant credentials reveal` if llmApiKeyCredential is set)
+ * 2. COGNEE_LLM_API_KEY env var (manual override)
  */
-export function resolveLlmApiKey(cfg: CogneePluginConfig): string {
+export async function resolveLlmApiKey(cfg: CogneePluginConfig): Promise<string> {
   if (cfg.llmApiKeyCredential) {
-    const envKey = (process.env.LLM_API_KEY ?? "").trim();
-    if (envKey) return envKey;
+    const credKey = await resolveCredential(cfg.llmApiKeyCredential);
+    if (credKey) return credKey;
   }
-  return (process.env.LLM_API_KEY ?? "").trim();
+  return (process.env.COGNEE_LLM_API_KEY ?? "").trim();
 }
 
 /**
  * Resolve the HTTP endpoint (baseUrl + apiKey) for runtime calls.
  */
-export function resolveHttpEndpoint(): { baseUrl: string; apiKey: string } {
+export async function resolveHttpEndpoint(): Promise<{ baseUrl: string; apiKey: string }> {
   const cfg = loadConfig();
   const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
-  const apiKey = resolveApiKeyFromConfig(cfg);
+  const apiKey = await resolveApiKeyFromConfig(cfg);
   return { baseUrl, apiKey };
 }
 
@@ -972,9 +985,9 @@ export function isServerReady(): boolean {
 // ─── Managed-server PID tracking ──────────────────────────────────────────────
 
 /**
- * Records the PID of a plugin-spawned (managed) Cognee server so the shutdown
+ * Records the PID of a plugin-spawned (local mode) Cognee server so the shutdown
  * hook can tear it down. Only written when the plugin owns the server
- * lifecycle (`config.managed === true`).
+ * lifecycle (`config.mode === "local"`).
  */
 function serverPidPath(): string {
   return join(sharedStateDir(), "server.pid");

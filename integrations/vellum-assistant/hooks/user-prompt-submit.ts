@@ -37,7 +37,7 @@ export default async function userPromptSubmit(
   setSessionEnv(conversationId);
 
   const cfg = loadConfig();
-  const { baseUrl, apiKey } = resolveHttpEndpoint();
+  const { baseUrl, apiKey } = await resolveHttpEndpoint();
 
   if (!apiKey) {
     hookLog("user_prompt_skip_no_api_key");
