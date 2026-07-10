@@ -150,8 +150,8 @@ function defaultConfig(): CogneePluginConfig {
   return {
     mode: "local",
     baseUrl: `http://${server.host}:${server.port}`,
-    apiKeyCredential: "",
-    llmApiKeyCredential: "",
+    apiKeyCredential: "cognee:api_key",
+    llmApiKeyCredential: "cognee:llm_api_key",
     dataset: "agent_sessions",
     agentName: "vellum-assistant",
     sessionPrefix: "vellum",

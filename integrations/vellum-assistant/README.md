@@ -83,8 +83,8 @@ The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state li
 {
   "mode": "local",
   "base_url": "http://127.0.0.1:8011",
-  "api_key_credential": "",
-  "llm_api_key_credential": "",
+  "api_key_credential": "cognee:api_key",
+  "llm_api_key_credential": "cognee:llm_api_key",
   "dataset": "agent_sessions",
   "agent_name": "vellum-assistant",
   "session_prefix": "vellum",
@@ -96,8 +96,8 @@ The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state li
 |-------|---------|-------------|
 | `mode` | `local` | `local` = plugin manages server (venv + uvicorn), `cloud`/`server` = external |
 | `base_url` | `http://127.0.0.1:8011` | Cognee server URL |
-| `api_key_credential` | (none) | Credential reference `service:field` for the Cognee API key |
-| `llm_api_key_credential` | (none) | Credential reference `service:field` for the LLM key (graph sync) |
+| `api_key_credential` | `cognee:api_key` | Credential reference `service:field` for the Cognee API key |
+| `llm_api_key_credential` | `cognee:llm_api_key` | Credential reference `service:field` for the LLM key (graph sync) |
 | `dataset` | `agent_sessions` | Dataset name for storage |
 | `agent_name` | `vellum-assistant` | Agent name for session IDs |
 | `session_prefix` | `vellum` | Session ID prefix |
@@ -147,9 +147,7 @@ vellum exec my-assistant -- assistant plugins install cognee
 vellum exec my-assistant -- bash -c 'cat > /workspace/plugins/cognee/config.json << EOF
 {
   "mode": "cloud",
-  "base_url": "https://your-cognee-server-url",
-  "api_key_credential": "cognee:api_key",
-  "llm_api_key_credential": "cognee:llm_api_key"
+  "base_url": "https://your-cognee-server-url"
 }
 EOF'
 
