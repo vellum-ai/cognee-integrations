@@ -127,7 +127,7 @@ async function ensureVenv(
       "provisioning managed cognee venv (first run — this can take a few minutes)",
     );
     mkdirSync(spec.venvDir, { recursive: true });
-    const created = await run([python, "-m", "venv", spec.venvDir], {
+    const created = await run([python, "-m", "venv", "--upgrade-deps", spec.venvDir], {
       timeoutMs: PROVISION_TIMEOUT_MS,
     });
     if (!created.ok) {
@@ -136,6 +136,26 @@ async function ensureVenv(
         "failed to create cognee venv — managed server unavailable",
       );
       hookLog("managed_venv_create_failed", { output: created.output });
+      return false;
+    }
+  }
+
+  // Ensure pip is available in the venv. Some base images (e.g. Debian
+  // without python3-pip) create venvs without pip. Bootstrap it via
+  // get-pip.py if the venv python can't import pip.
+  const pipCheck = await run([py, "-c", "import pip"], { timeoutMs: 10_000 });
+  if (!pipCheck.ok) {
+    logger.info({ venvDir: spec.venvDir }, "pip not found in venv — bootstrapping via get-pip.py");
+    const bootstrapped = await run(
+      [py, "-c", "import urllib.request, sys; urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py', '/tmp/get-pip.py'); import subprocess; sys.exit(subprocess.call([sys.executable, '/tmp/get-pip.py']))"],
+      { timeoutMs: 120_000 },
+    );
+    if (!bootstrapped.ok) {
+      logger.error(
+        { output: bootstrapped.output },
+        "pip bootstrap failed — managed server unavailable",
+      );
+      hookLog("managed_pip_bootstrap_failed", { output: bootstrapped.output });
       return false;
     }
   }
