@@ -23,6 +23,7 @@ import {
   cacheApiKey,
   resolveApiKeyFromConfig,
   resolveLlmApiKey,
+  resolveBaseUrl,
   isLocalUrl,
   touchActivity,
 } from "../src/plugin-common.ts";
@@ -174,6 +175,21 @@ export default async function init(ctx: InitContext): Promise<void> {
   // Persist the resolved config so the runtime hooks (which read the state
   // file via loadConfig) operate on the same values init resolved.
   saveConfig(cfg);
+
+  // If the config didn't specify an explicit base_url (i.e. we're still
+  // on the local default), check the credential store for a base_url
+  // override. This enables Option B: set cognee:base_url credential and
+  // skip the config.json step entirely.
+  if (!fromContext || !("base_url" in (ctx.config ?? {}))) {
+    const credUrl = await resolveBaseUrl(cfg);
+    if (credUrl) {
+      cfg.baseUrl = credUrl.replace(/\/+$/, "");
+      cfg.mode = isLocalUrl(cfg.baseUrl) ? "local" : "cloud";
+      saveConfig(cfg);
+      hookLog("init_base_url_from_credential", { baseUrl: cfg.baseUrl, mode: cfg.mode });
+    }
+  }
+
   const { baseUrl } = cfg;
   hookLog("init_config", {
     mode: cfg.mode,

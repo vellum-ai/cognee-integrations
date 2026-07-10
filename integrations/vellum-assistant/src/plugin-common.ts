@@ -43,15 +43,15 @@ export function getPluginRoot(): string {
 
 /**
  * Shared state directory for cross-session state like the API key cache,
- * server-ready marker, and circuit breaker. Rooted under the Vellum workspace
- * directory so state persists across container restarts (Docker hatches only
- * persist $VELLUM_WORKSPACE_DIR). Falls back to ~/.cognee-plugin only when
- * the workspace dir can't be determined (e.g. running standalone outside
- * a Vellum host).
+ * server-ready marker, and circuit breaker. Rooted under the plugin install
+ * directory ($VELLUM_WORKSPACE_DIR/plugins/cognee/data) so state persists
+ * across container restarts (Docker hatches only persist $VELLUM_WORKSPACE_DIR).
+ * Falls back to ~/.cognee-plugin only when the workspace dir can't be
+ * determined (e.g. running standalone outside a Vellum host).
  */
 export function sharedStateDir(): string {
   const ws = workspaceDir();
-  if (ws) return join(ws, ".cognee-plugin");
+  if (ws) return join(ws, "plugins", "cognee", "data");
   return process.env.COGNEE_PLUGIN_STATE_DIR ?? join(homedir(), ".cognee-plugin");
 }
 
@@ -111,6 +111,14 @@ export interface CogneePluginConfig {
   mode: "local" | "cloud" | "server";
   baseUrl: string;
   /**
+   * Credential reference for the Cognee server base URL in `service:field` form
+   * (e.g. `cognee:base_url`). Resolved via `assistant credentials reveal` at
+   * runtime. When set, the plugin uses this URL instead of the local default,
+   * auto-detecting cloud/server mode. This lets Option B users skip the
+   * config.json step entirely.
+   */
+  baseUrlCredential: string;
+  /**
    * Credential reference in `service:field` form (e.g. `cognee:api_key`).
    * Resolved at runtime via `assistant credentials reveal --service <s> --field <f>`.
    * Falls back to `COGNEE_API_KEY` env var or the auto-minted cache for local servers.
@@ -150,6 +158,7 @@ function defaultConfig(): CogneePluginConfig {
   return {
     mode: "local",
     baseUrl: `http://${server.host}:${server.port}`,
+    baseUrlCredential: "cognee:base_url",
     apiKeyCredential: "cognee:api_key",
     llmApiKeyCredential: "cognee:llm_api_key",
     dataset: "agent_sessions",
@@ -189,6 +198,7 @@ function applyRawConfig(
   };
 
   takeString("base_url", (v) => (cfg.baseUrl = v));
+  takeString("base_url_credential", (v) => (cfg.baseUrlCredential = v));
   takeString("api_key_credential", (v) => (cfg.apiKeyCredential = v));
   takeString("llm_api_key_credential", (v) => (cfg.llmApiKeyCredential = v));
   takeString("dataset", (v) => (cfg.dataset = v));
@@ -254,6 +264,7 @@ function applyEnvOverrides(cfg: CogneePluginConfig): void {
     if (m === "local" || m === "cloud" || m === "server") cfg.mode = m;
   }
   if (process.env.COGNEE_API_KEY_CREDENTIAL) cfg.apiKeyCredential = process.env.COGNEE_API_KEY_CREDENTIAL;
+  if (process.env.COGNEE_BASE_URL_CREDENTIAL) cfg.baseUrlCredential = process.env.COGNEE_BASE_URL_CREDENTIAL;
   if (process.env.COGNEE_LLM_API_KEY_CREDENTIAL) cfg.llmApiKeyCredential = process.env.COGNEE_LLM_API_KEY_CREDENTIAL;
   if (process.env.COGNEE_PLUGIN_DATASET) cfg.dataset = process.env.COGNEE_PLUGIN_DATASET;
   if (process.env.COGNEE_AGENT_NAME) cfg.agentName = process.env.COGNEE_AGENT_NAME;
@@ -351,6 +362,7 @@ function toRawConfig(cfg: CogneePluginConfig): Record<string, unknown> {
   return {
     mode: cfg.mode,
     base_url: cfg.baseUrl,
+    base_url_credential: cfg.baseUrlCredential,
     api_key_credential: cfg.apiKeyCredential,
     llm_api_key_credential: cfg.llmApiKeyCredential,
     dataset: cfg.dataset,
@@ -622,6 +634,23 @@ export async function resolveApiKeyFromConfig(cfg: CogneePluginConfig): Promise<
 }
 
 /**
+ * Resolve the Cognee server base URL from the credential store. If
+ * `baseUrlCredential` is set (e.g. `cognee:base_url`) and the credential
+ * resolves, the returned URL overrides the local default. This enables
+ * the zero-config Option B flow: set a `cognee:base_url` credential and
+ * the plugin auto-detects cloud mode without a config.json.
+ *
+ * Returns empty string if no credential is found.
+ */
+export async function resolveBaseUrl(cfg: CogneePluginConfig): Promise<string> {
+  if (cfg.baseUrlCredential) {
+    const credUrl = await resolveCredential(cfg.baseUrlCredential);
+    if (credUrl) return credUrl.trim();
+  }
+  return "";
+}
+
+/**
  * Resolve the LLM API key for the Cognee server's cognify pipeline.
  * In local mode, this is passed to the spawned server process as
  * COGNEE_LLM_API_KEY. In cloud/server mode, the LLM key must be
@@ -643,11 +672,17 @@ export async function resolveLlmApiKey(cfg: CogneePluginConfig): Promise<string>
  * Resolve the HTTP endpoint (baseUrl + apiKey) for runtime calls.
  */
 export async function resolveHttpEndpoint(): Promise<{ baseUrl: string; apiKey: string }> {
-  const cfg = loadConfig();
-  const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
-  const apiKey = await resolveApiKeyFromConfig(cfg);
-  return { baseUrl, apiKey };
-}
+    const cfg = loadConfig();
+    let baseUrl = cfg.baseUrl.replace(/\/+$/, "");
+    // If the config has the default local base URL, check the credential
+    // store for a base_url override (Option B zero-config flow).
+    if (cfg.baseUrlCredential && isLocalUrl(baseUrl)) {
+      const credUrl = await resolveBaseUrl(cfg);
+      if (credUrl) baseUrl = credUrl.replace(/\/+$/, "");
+    }
+    const apiKey = await resolveApiKeyFromConfig(cfg);
+    return { baseUrl, apiKey };
+  }
 
 // ─── Hook logging ─────────────────────────────────────────────────────────────
 

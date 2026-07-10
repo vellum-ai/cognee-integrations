@@ -28,71 +28,32 @@ vellum message my-assistant "hello"
 # 1. Hatch a Vellum assistant
 vellum hatch --name my-assistant --remote docker -d
 
-# 2. Store the Cognee API key and LLM API key
+# 2. Store the Cognee API key, LLM API key, and server base URL
 vellum exec my-assistant -- assistant credentials set your-cognee-api-key --service cognee --field api_key
 vellum exec my-assistant -- assistant credentials set sk-... --service cognee --field llm_api_key
+vellum exec my-assistant -- assistant credentials set https://your-cognee-server-url --service cognee --field base_url
 
-# 3. Install the plugin
+# 3. Install the plugin (auto-detects cloud mode from the base_url credential)
 vellum exec my-assistant -- assistant plugins install cognee
 
-# 4. Configure the plugin to point at the external server
-vellum exec my-assistant -- bash -c 'cat > /workspace/plugins/cognee/config.json << EOF
-{
-  "mode": "cloud",
-  "base_url": "https://your-cognee-server-url"
-}
-EOF'
-
-# 5. Start a conversation
+# 4. Start a conversation
 vellum message my-assistant "hello"
 ```
 
 ## Architecture
 
-This is a **pure TypeScript** plugin — no Python, no subprocess. All logic runs in-process under Bun, using Bun's native `fetch` for HTTP calls to the Cognee API.
+This is a **TypeScript plugin** that runs under Bun. In local mode, the init hook provisions a Python venv, installs cognee, and spawns a uvicorn server as a subprocess. All HTTP calls to the Cognee API use Bun's native `fetch`.
 
 ### File layout
 
 ```
 vellum-assistant/
-  package.json              # Vellum plugin manifest (peer dep @vellumai/plugin-api ^0.10.3)
-  src/
-    cognee-client.ts         # HTTP client: recall, remember, agent registration, circuit breaker
-    plugin-common.ts         # Config, session mapping, logging, bridge cache, API key resolution
-    bridge.ts                # Session resolution helpers (conversationId → Cognee session)
-    session-start.ts         # Init logic: backend check, API key minting, agent registration
-    session-context-lookup.ts # Recall for auto-context injection (session + trace + graph)
-    store-to-session.ts      # Store tool calls (TraceEntry) and QA pairs (QAEntry)
-    store-user-prompt.ts     # Stage user prompt for pairing with assistant response
-    sync-session-to-graph.ts # Bridge session cache → permanent graph (dedup by hash)
-    post-compact.ts          # Build memory anchor after context compaction
-    exit-watcher.ts          # Background: final sync when parent process exits
-    idle-watcher.ts          # Background: sync idle sessions
-  hooks/
-    init.ts                  # Plugin init: disable Vellum default memory, resolve backend
-    user-prompt-submit.ts    # Auto-recall + stage prompt
-    post-tool-use.ts         # Store tool calls as TraceEntries
-    stop.ts                  # Pair prompt+response as QAEntry, auto-sync threshold
-    post-compact.ts          # Inject memory anchor after compaction
-    shutdown.ts              # Final graph sync + unregister agent
-  tools/
-    cognee-recall.ts         # Model-visible tool for explicit memory search
-  skills/
-    cognee-remember/         # Skill: store data in permanent graph
-    cognee-search/           # Skill: search memory (uses cognee_recall tool)
-    cognee-sync/             # Skill: manual session-to-graph sync
+  package.json              # Vellum plugin manifest
+  src/                      # Core logic (client, config, server management, session bridge)
+  hooks/                    # Plugin lifecycle hooks (init, user-prompt-submit, post-tool-use, stop, etc.)
+  tools/                    # Model-visible tools (cognee-recall)
+  skills/                   # User-facing skills (cognee-remember, cognee-search, cognee-sync)
 ```
-
-### Hook mapping
-
-| Hook | Fires | What it does |
-|------|-------|-------------|
-| `init` | Plugin install/load | Disables Vellum default memory, resolves backend, mints API key if local, passes LLM key to local server |
-| `user-prompt-submit` | Each user turn | Auto-recalls relevant context from Cognee, injects into messages, stages prompt |
-| `post-tool-use` | After each tool call | Stores tool call as TraceEntry in session cache |
-| `stop` | Turn end | Pairs staged prompt with assistant response as QAEntry, triggers graph sync if threshold reached |
-| `post-compact` | After compaction | Pulls memory anchor (recent QAs, trace, graph context), injects into compacted history |
-| `shutdown` | Plugin unload | Final graph sync, unregisters agent connection |
 
 ### Disabling Vellum's default memory
 
@@ -106,17 +67,19 @@ The `init` hook disables Vellum's built-in memory system so Cognee is the sole m
 
 This works because user plugin `init` hooks run **before** `bootstrapPlugins()` checks the `.disabled` sentinels for default plugins.
 
+> **Note:** Vellum intends to make this easier in the future with a first-class plugin API for opting out of the default memory system. The current approach is a workaround until that ships.
+
 ### Circuit breaker
 
-Recall calls go through a file-based circuit breaker (`$VELLUM_WORKSPACE_DIR/.cognee-plugin/recall-breaker.json`). After 5 consecutive failures (UNREACHABLE or 5xx), the breaker opens for 120 seconds. A reachable 4xx (auth error) does NOT trip the breaker — waiting won't fix a config problem.
+Recall calls go through a file-based circuit breaker (`$VELLUM_WORKSPACE_DIR/plugins/cognee/data/recall-breaker.json`). After 5 consecutive failures (UNREACHABLE or 5xx), the breaker opens for 120 seconds. A reachable 4xx (auth error) does NOT trip the breaker — waiting won't fix a config problem.
 
 ### Session management
 
-The host session key (Vellum `conversationId`) maps to a deterministic Cognee session ID via first-writer-wins file creation at `$VELLUM_WORKSPACE_DIR/.cognee-plugin/vellum-assistant/sessions/<hostKey>.json`. A separate per-launch `conn_uuid` is the registration/liveness handle.
+The host session key (Vellum `conversationId`) maps to a deterministic Cognee session ID via first-writer-wins file creation at `$VELLUM_WORKSPACE_DIR/plugins/cognee/data/vellum-assistant/sessions/<hostKey>.json`. A separate per-launch `conn_uuid` is the registration/liveness handle.
 
 ### Plugin directory
 
-The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state lives under `$VELLUM_WORKSPACE_DIR/.cognee-plugin/` (shared: API key cache, server-ready marker, circuit breaker) and `$VELLUM_WORKSPACE_DIR/.cognee-plugin/vellum-assistant/` (per-session: logs, session maps, bridge cache).
+The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state lives under `$VELLUM_WORKSPACE_DIR/plugins/cognee/data/` (shared: API key cache, server-ready marker, circuit breaker) and `$VELLUM_WORKSPACE_DIR/plugins/cognee/data/vellum-assistant/` (per-session: logs, session maps, bridge cache).
 
 ## Configuration
 
@@ -128,6 +91,7 @@ The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state li
 {
   "mode": "local",
   "base_url": "http://127.0.0.1:8011",
+  "base_url_credential": "cognee:base_url",
   "api_key_credential": "cognee:api_key",
   "llm_api_key_credential": "cognee:llm_api_key",
   "dataset": "agent_sessions",
@@ -141,6 +105,7 @@ The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state li
 |-------|---------|-------------|
 | `mode` | `local` | `local` = plugin manages server (venv + uvicorn), `cloud`/`server` = external |
 | `base_url` | `http://127.0.0.1:8011` | Cognee server URL |
+| `base_url_credential` | `cognee:base_url` | Credential reference `service:field` for the Cognee server URL (enables zero-config Option B) |
 | `api_key_credential` | `cognee:api_key` | Credential reference `service:field` for the Cognee API key |
 | `llm_api_key_credential` | `cognee:llm_api_key` | Credential reference `service:field` for the LLM key (graph sync) |
 | `dataset` | `agent_sessions` | Dataset name for storage |
@@ -150,10 +115,11 @@ The plugin is installed at `$VELLUM_WORKSPACE_DIR/plugins/cognee/`. All state li
 
 ### Credential store integration
 
-The plugin resolves credentials via `assistant credentials reveal --service <s> --field <f> --json` at runtime. Two credential references are supported:
+The plugin resolves credentials via `assistant credentials reveal --service <s> --field <f> --json` at runtime. Three credential references are supported:
 
+- **`base_url_credential`** (e.g. `cognee:base_url`) — the Cognee server URL. When set, the plugin auto-detects cloud/server mode from the URL and skips the local server setup. This enables the zero-config Option B flow.
 - **`api_key_credential`** (e.g. `cognee:api_key`) — authenticates the plugin to the Cognee server. For local servers, can be left empty (auto-minted on first run).
-- **`llm_api_key_credential`** (e.g. `openai:api_key`) — the LLM key the Cognee server needs for its cognify pipeline (graph sync). In local mode, the plugin passes this to the spawned server as `COGNEE_LLM_API_KEY`. For remote servers, configure the LLM key on the server itself.
+- **`llm_api_key_credential`** (e.g. `cognee:llm_api_key`) — the LLM key the Cognee server needs for its cognify pipeline (graph sync). In local mode, the plugin passes this to the spawned server as `COGNEE_LLM_API_KEY`. For remote servers, configure the LLM key on the server itself.
 
 ## Cognee server
 
@@ -184,7 +150,7 @@ The init hook checks for an LLM key and logs a warning if none is configured.
 
 1. Credential store (via `assistant credentials reveal` if `api_key_credential` is set)
 2. `COGNEE_API_KEY` env var (manual override)
-3. Cached key at `$VELLUM_WORKSPACE_DIR/.cognee-plugin/api_key.json` (auto-minted on first init for local servers)
+3. Cached key at `$VELLUM_WORKSPACE_DIR/plugins/cognee/data/api_key.json` (auto-minted on first init for local servers)
 4. For local servers with no key: the init hook mints one via `/api/v1/auth/login` + `/api/v1/auth/api-keys`
 
 ## Diff from Claude Code integration
@@ -193,11 +159,11 @@ This integration is adapted from the [Claude Code cognee plugin](../claude-code/
 
 | Aspect | Claude Code | Vellum Assistant |
 |--------|-------------|-------------------|
-| Language | Python scripts + shell wrappers | Pure TypeScript (Bun) |
+| Language | Python scripts + shell wrappers | TypeScript (Bun) |
 | Hooks | JSON-configured subprocess hooks | TypeScript hooks (in-process) |
 | Manifest | `.claude-plugin/plugin.json` + `hooks/hooks.json` | `package.json` |
 | Tools | Agent definition (markdown) | `ToolDefinition` (TypeScript) |
 | Memory disabling | N/A | Disables Vellum default memory via config + sentinels |
 | Plugin dir | `~/.claude/plugins/` | `$VELLUM_WORKSPACE_DIR/plugins/cognee/` |
 | Session key | Claude session ID | Vellum `conversationId` |
-| Subprocess | Yes (Python via stdin/stdout JSON) | No (all in-process) |
+| Server management | External (user-run) | Local mode: plugin provisions venv + spawns uvicorn. Cloud mode: external. |

@@ -8,8 +8,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { sharedStateDir } from "./plugin-common.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -30,7 +30,7 @@ const THRESHOLD = Number(process.env.COGNEE_BREAKER_THRESHOLD ?? 5);
 const COOLDOWN = Number(process.env.COGNEE_BREAKER_COOLDOWN ?? 120);
 
 function stateDir(): string {
-  return process.env.COGNEE_PLUGIN_STATE_DIR ?? join(homedir(), ".cognee-plugin");
+  return sharedStateDir();
 }
 
 function breakerPath(): string {

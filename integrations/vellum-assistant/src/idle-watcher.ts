@@ -7,7 +7,8 @@
  *   - Stops on SIGTERM or watcher.stop sentinel file
  *
  * Launched detached from session-start. Polls
- * `~/.cognee-plugin/vellum-assistant/activity.ts` every POLL_SECONDS.
+ * `$VELLUM_WORKSPACE_DIR/plugins/cognee/data/vellum-assistant/activity.ts`
+ * every POLL_SECONDS.
  * When the last activity is older than IDLE_SECONDS and we haven't
  * bridged since that point, persists the session cache to the graph.
  */
