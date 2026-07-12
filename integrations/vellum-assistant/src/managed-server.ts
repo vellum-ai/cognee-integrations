@@ -127,7 +127,7 @@ async function ensureVenv(
       "provisioning managed cognee venv (first run — this can take a few minutes)",
     );
     mkdirSync(spec.venvDir, { recursive: true });
-    const created = await run([python, "-m", "venv", "--upgrade-deps", spec.venvDir], {
+    const created = await run([python, "-m", "venv", spec.venvDir], {
       timeoutMs: PROVISION_TIMEOUT_MS,
     });
     if (!created.ok) {
