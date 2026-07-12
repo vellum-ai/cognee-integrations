@@ -16,7 +16,7 @@ vellum hatch --name my-assistant --remote docker -d
 vellum exec my-assistant -- assistant credentials set sk-... --service cognee --field llm_api_key
 
 # 3. Install the plugin (triggers the init hook, which provisions and starts the server)
-vellum exec my-assistant -- assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant --name cognee
+vellum exec my-assistant -- assistant plugins install cognee
 
 # 4. Start a conversation
 vellum message my-assistant "hello"
@@ -34,7 +34,7 @@ vellum exec my-assistant -- assistant credentials set sk-... --service cognee --
 vellum exec my-assistant -- assistant credentials set https://your-cognee-server-url --service cognee --field base_url
 
 # 3. Install the plugin (auto-detects cloud mode from the base_url credential)
-vellum exec my-assistant -- assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/main/integrations/vellum-assistant --name cognee
+vellum exec my-assistant -- assistant plugins install cognee
 
 # 4. Start a conversation
 vellum message my-assistant "hello"
@@ -152,3 +152,11 @@ The init hook checks for an LLM key and logs a warning if none is configured.
 2. `COGNEE_API_KEY` env var (manual override)
 3. Cached key at `$VELLUM_WORKSPACE_DIR/plugins/cognee/data/api_key.json` (auto-minted on first init for local servers)
 4. For local servers with no key: the init hook mints one via `/api/v1/auth/login` + `/api/v1/auth/api-keys`
+
+## Development
+
+The quick start uses `assistant plugins install cognee`, which pulls from the Vellum marketplace (pinned to a specific commit of the upstream repo). To install from a fork or branch instead, use the full GitHub URL form:
+
+```bash
+assistant plugins install https://github.com/vellum-ai/cognee-integrations/tree/<branch>/integrations/vellum-assistant --name cognee
+```
